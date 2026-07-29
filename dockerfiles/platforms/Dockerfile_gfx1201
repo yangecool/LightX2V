@@ -57,7 +57,11 @@ ENV PLATFORM=amd_rocm \
     AITER_COMMIT=${AITER_COMMIT} \
     AITER_JIT_DIR=/workspace/.cache/aiter \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-    SAFETENSORS_FAST_GPU=1
+    SAFETENSORS_FAST_GPU=1 \
+    LIGHTX2V_PATH=/workspace/LightX2V \
+    MODELS_ROOT=/models \
+    MODEL_PATH=/models/Wan-AI/Wan2.2-I2V-A14B \
+    LIGHTX2V_OUTPUT_DIR=/outputs
 
 # Replace any Aiter package inherited from the base image.
 RUN --mount=type=bind,from=build_aiter,src=/app/aiter-install,target=/aiter-install \
@@ -86,6 +90,10 @@ RUN apt-get update \
     && mkdir -p "${AITER_JIT_DIR}" \
     && chmod 0777 "${AITER_JIT_DIR}"
 
+RUN chmod 0755 /workspace/LightX2V/scripts/platforms/amd_rocm/lightx2v_generate_gfx1201.sh \
+    && ln -s /workspace/LightX2V/scripts/platforms/amd_rocm/lightx2v_generate_gfx1201.sh /usr/local/bin/lightx2v-generate \
+    && mkdir -p /models /outputs
+
 RUN mkdir -p /app \
     && { \
         echo "BASE_IMAGE=${BASE_IMAGE_SOURCE}"; \
@@ -96,5 +104,6 @@ RUN mkdir -p /app \
         echo "PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}"; \
     } >> /app/versions.txt
 
+VOLUME ["/models", "/outputs"]
 ENTRYPOINT []
 CMD ["bash"]
