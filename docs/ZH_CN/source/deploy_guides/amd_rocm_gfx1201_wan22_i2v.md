@@ -74,16 +74,9 @@
 
 ## 启动
 
-### 容器内一键启动
+### 容器脚本启动
 
-GFX1201 镜像固定使用以下容器目录：
-
-- 模型根目录：`/models`
-- 生成结果目录：`/outputs`
-- LightX2V 源码：`/workspace/LightX2V`
-- 默认 GPU：容器内逻辑设备 `0`
-
-启动容器时只需要挂载准备好的模型目录和输出目录：
+与 NVIDIA 镜像保持相同的职责边界：Dockerfile 只提供运行环境和 LightX2V 源码，不固定模型卷、不设置全局模型路径，也不替换容器入口。模型和结果目录由 `docker run` 挂载：
 
 ```bash
 docker run --rm -it \
@@ -91,19 +84,17 @@ docker run --rm -it \
   --device=/dev/dri \
   --ipc=host \
   -v /path/to/models:/models:ro \
-  -v /path/to/outputs:/outputs \
+  -v /path/to/outputs:/workspace/LightX2V/save_results \
   lightx2v-rocm:gfx1201-hvat-scratch
 ```
 
 进入容器后执行：
 
 ```bash
-lightx2v-generate
+bash /workspace/LightX2V/scripts/platforms/amd_rocm/run_wan22_moe_i2v_distill_fp8_4step_gfx1201.sh
 ```
 
-该命令固定启动 Wan2.2 I2V 720p、81 帧、4-step FP8 管线，自动使用示例输入图、逻辑 GPU 0 和带时间戳的输出文件。启动前会检查基础模型、high/low noise FP8 DiT、FP8 T5、VAE、tokenizer 和 ROCm 设备；缺少任何文件时会直接列出准确路径。
-
-需要替换默认内容时可以通过 `LIGHTX2V_INPUT_IMAGE`、`LIGHTX2V_PROMPT`、`LIGHTX2V_NEGATIVE_PROMPT`、`LIGHTX2V_OUTPUT_PATH`、`LIGHTX2V_SEED` 或 `LIGHTX2V_GPU` 覆盖，但默认生成不需要设置任何变量。
+该 GFX1201 脚本提供容器内默认值：LightX2V 位于 `/workspace/LightX2V`，模型根目录为 `/models`，Wan2.2 基础模型位于 `/models/Wan-AI/Wan2.2-I2V-A14B`，默认使用逻辑 GPU 0。路径仍可通过 `LIGHTX2V_PATH`、`MODELS_ROOT`、`MODEL_PATH`、`HIP_VISIBLE_DEVICES` 或 `CUDA_VISIBLE_DEVICES` 覆盖，不影响 Dockerfile 的通用性。
 
 ### 源码脚本启动
 

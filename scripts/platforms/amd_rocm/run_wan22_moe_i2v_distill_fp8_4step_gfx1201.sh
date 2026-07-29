@@ -1,12 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-lightx2v_path="${LIGHTX2V_PATH:-}"
-models_root="${MODELS_ROOT:-}"
-model_path="${MODEL_PATH:-}"
-: "${lightx2v_path:?Set LIGHTX2V_PATH to the LightX2V checkout}"
-: "${models_root:?Set MODELS_ROOT to the directory containing Wan-AI, lightx2v, and encoders}"
-: "${model_path:?Set MODEL_PATH to the Wan2.2 model root}"
+lightx2v_path="${LIGHTX2V_PATH:-/workspace/LightX2V}"
+models_root="${MODELS_ROOT:-/models}"
+model_path="${MODEL_PATH:-${models_root}/Wan-AI/Wan2.2-I2V-A14B}"
 
 export PLATFORM=amd_rocm
 export DTYPE=BF16
