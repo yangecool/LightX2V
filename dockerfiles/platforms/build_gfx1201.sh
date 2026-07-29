@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 lightx2v_dir="$(cd "${script_dir}/../.." && pwd)"
 
-base_image_source="${BASE_IMAGE:-vllm-openai-rocm:hvat-gfx1201-scratch-v0.25.0-0716-TunedA8W8}"
+base_image_source="${BASE_IMAGE:-rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0}"
 image_tag="${IMAGE_TAG:-lightx2v-rocm:gfx1201-hvat-scratch}"
 pytorch_rocm_arch="${PYTORCH_ROCM_ARCH:-gfx1201}"
 aiter_rocm_arch="${AITER_ROCM_ARCH:-gfx1201}"

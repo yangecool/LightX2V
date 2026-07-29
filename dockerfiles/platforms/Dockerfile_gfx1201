@@ -1,7 +1,7 @@
 # LightX2V Wan2.2 image for AMD RDNA4 gfx1201.
 # Aiter is rebuilt from the pinned source commit, following vLLM's gfx1201
 # image structure. Use build_gfx1201.sh to pin the local base by image ID.
-ARG BASE_IMAGE=vllm-openai-rocm:hvat-gfx1201-scratch-v0.25.0-0716-TunedA8W8
+ARG BASE_IMAGE=rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
 ARG AITER_REPO=https://github.com/yangecool/aiter.git
 ARG AITER_COMMIT=1b37c33172ea807d528de91c7b4f8f74ff61ec44
 ARG AITER_ROCM_ARCH=gfx1201
