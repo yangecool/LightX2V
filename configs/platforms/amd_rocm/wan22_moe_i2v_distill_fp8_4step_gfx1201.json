@@ -32,7 +32,7 @@
     "t5_quantized_ckpt": "encoders/t5/models_t5_umt5-xxl-enc-fp8.pth",
     "high_noise_quantized_ckpt": "lightx2v/Wan2.2-Distill-Models/wan2.2_i2v_A14b_high_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
     "low_noise_quantized_ckpt": "lightx2v/Wan2.2-Distill-Models/wan2.2_i2v_A14b_low_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors",
-    "rms_norm_type": "torch",
+    "rms_norm_type": "sgl-kernel",
     "rope_type": "torch_real_rope",
     "modulate_type": "torch",
     "feature_caching": "NoCaching",

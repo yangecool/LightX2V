@@ -1,6 +1,6 @@
 # AMD ROCm GFX1201 上的 Wan2.2 I2V
 
-本文只描述 `gfx1201-hvat-scratch` 分支中已经配置的单卡 Wan2.2 I2V 管线。目标卡为 32 GB 显存、原生支持 E4M3/E5M2 FP8 矩阵计算的 AMD RDNA4/GFX1201。所有配置均使用 Aiter FlyDSL BF16 Flash Attention 作为 self-attention，使用 Aiter Triton BF16 Flash Attention 作为 text cross-attention，并使用 Torch RMSNorm/RoPE、关闭多卡并行。
+本文只描述 `gfx1201-hvat-scratch` 分支中已经配置的单卡 Wan2.2 I2V 管线。目标卡为 32 GB 显存、原生支持 E4M3/E5M2 FP8 矩阵计算的 AMD RDNA4/GFX1201。所有配置均使用 Aiter FlyDSL BF16 Flash Attention 作为 self-attention，使用 Aiter Triton BF16 Flash Attention 作为 text cross-attention，使用 Aiter RMSNorm 和 Torch RoPE，并关闭多卡并行。
 
 > 所有 GFX1201 配置尚未进行镜像或硬件验证。32 GB 和原生 FP8 能力使蒸馏 FP8 成为最合理的首测管线，但不代表已经确认能在 32 GB 内完成 720p/81 帧生成。
 

@@ -32,8 +32,13 @@ requires_gfx1201 = pytest.mark.skipif(
 def _fake_aiter():
     calls = []
 
-    def gemm(*args):
+    def public_gemm(*args):
         calls.append(("public", args))
+        x, w = args[:2]
+        return torch.zeros((x.shape[0], w.shape[0]), dtype=args[5], device=x.device)
+
+    def ck_gemm(*args):
+        calls.append(("ck", args))
         x, w = args[:2]
         return torch.zeros((x.shape[0], w.shape[0]), dtype=args[5], device=x.device)
 
@@ -42,7 +47,8 @@ def _fake_aiter():
         return x.to(quant_dtype), torch.ones((x.shape[0], 1), dtype=torch.float32)
 
     module = SimpleNamespace(
-        gemm_a8w8=gemm,
+        gemm_a8w8=public_gemm,
+        gemm_a8w8_CK=ck_gemm,
         pertoken_quant=quant,
         dtypes=SimpleNamespace(fp8=torch.float8_e4m3fn, i8=torch.int8),
         rmsnorm2d_fwd=lambda x, weight, eps, mode: x,
@@ -51,16 +57,11 @@ def _fake_aiter():
     return module, calls
 
 
-def test_gfx1201_fp8_layout_and_bias(monkeypatch):
+def test_gfx1201_ck_fp8_layout_and_bias(monkeypatch):
     module, calls = _fake_aiter()
     monkeypatch.setattr(amd_rocm, "_runtime_gfx", lambda: "gfx1201")
     compat = amd_rocm.AiterSglKernelCompat(module)
 
-    def per_token(x, w, x_scale, w_scale, dtype):
-        calls.append(("per_token", x, w, x_scale, w_scale))
-        return torch.zeros((x.shape[0], w.shape[0]), dtype=dtype)
-
-    compat._gemm_a8w8_per_token_scale = per_token
     x = torch.zeros((3, 5), dtype=torch.int8)
     # SGL passes [K, N] as a transposed view of the checkpoint [N, K].
     checkpoint_weight = torch.zeros((7, 5), dtype=torch.int8)
@@ -75,12 +76,15 @@ def test_gfx1201_fp8_layout_and_bias(monkeypatch):
     )
 
     assert output.shape == (3, 7)
-    kind, _, restored_weight, _, restored_scale = calls[-1]
-    assert kind == "per_token"
+    kind, args = calls[-1]
+    _, restored_weight, _, restored_scale, restored_bias, restored_dtype = args
+    assert kind == "ck"
     assert tuple(restored_weight.shape) == (7, 5)
     assert restored_weight.is_contiguous()
     assert tuple(restored_scale.shape) == (7, 1)
-    assert torch.all(output == 1)
+    assert restored_bias.shape == (7,)
+    assert restored_dtype == torch.bfloat16
+    assert torch.all(output == 0)
 
 
 def test_quant_uses_e4m3fn(monkeypatch):
@@ -93,17 +97,17 @@ def test_quant_uses_e4m3fn(monkeypatch):
     assert calls[-1] == ("quant", torch.float8_e4m3fn)
 
 
-def test_gfx1201_vector_scales_are_zero_copy_columns(monkeypatch):
+def test_gfx1201_ck_vector_scales_are_zero_copy(monkeypatch):
     module, _ = _fake_aiter()
     monkeypatch.setattr(amd_rocm, "_runtime_gfx", lambda: "gfx1201")
     compat = amd_rocm.AiterSglKernelCompat(module)
     observed = {}
 
-    def per_token(x, w, x_scale, w_scale, dtype):
+    def ck_gemm(x, w, x_scale, w_scale, bias, dtype):
         observed.update(x_scale=x_scale, w_scale=w_scale)
         return torch.zeros((x.shape[0], w.shape[0]), dtype=dtype)
 
-    compat._gemm_a8w8_per_token_scale = per_token
+    compat._gemm_a8w8 = ck_gemm
     input_scale = torch.ones(3, dtype=torch.float32)
     weight_scale = torch.ones(7, dtype=torch.float32)
     checkpoint_weight = torch.zeros((7, 5), dtype=torch.int8)
@@ -115,8 +119,8 @@ def test_gfx1201_vector_scales_are_zero_copy_columns(monkeypatch):
         torch.bfloat16,
     )
 
-    assert observed["x_scale"].shape == (3, 1)
-    assert observed["w_scale"].shape == (7, 1)
+    assert observed["x_scale"].shape == (3,)
+    assert observed["w_scale"].shape == (7,)
     assert observed["x_scale"].data_ptr() == input_scale.data_ptr()
     assert observed["w_scale"].data_ptr() == weight_scale.data_ptr()
 
@@ -164,7 +168,7 @@ def test_gfx1201_fp8_gemm_matches_dequantized_reference():
     import aiter
 
     compat = amd_rocm.AiterSglKernelCompat(aiter)
-    assert compat._gemm_a8w8_per_token_scale is not None
+    assert compat._gemm_backend == "ck-rowwise"
     device = torch.device("cuda")
     torch.manual_seed(7)
     m, n, k = 37, 53, 128

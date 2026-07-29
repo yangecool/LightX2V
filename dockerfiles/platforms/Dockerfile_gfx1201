@@ -1,34 +1,43 @@
 # LightX2V Wan2.2 image for AMD RDNA4 gfx1201.
-# Aiter is rebuilt from the local aiter_source build context, following vLLM's
-# gfx1201 image structure. build_gfx1201.sh validates its pinned Git revision.
-ARG BASE_IMAGE=rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
+# The vLLM base owns ROCm, PyTorch, torchvision, torchaudio, Triton, and
+# FlashAttention. Aiter and LightX2V are rebuilt from local source contexts.
+ARG BASE_IMAGE=vllm/vllm-openai-rocm:v0.25.0-base
+ARG APT_MIRROR=https://mirrors.ctyun.cn/ubuntu
+ARG PIP_INDEX_URL=https://mirrors.ctyun.cn/pypi/simple
+ARG UV_VERSION=0.11.32
 ARG AITER_REPO=https://github.com/yangecool/aiter.git
-ARG AITER_COMMIT=1b37c33172ea807d528de91c7b4f8f74ff61ec44
-ARG AITER_VERSION=0.1.16.post3+gfx1201.g1b37c3317
+ARG AITER_COMMIT=unknown
+ARG AITER_VERSION=0.1.16.post3+gfx1201
 ARG AITER_ROCM_ARCH=gfx1201
-ARG ACCELERATE_VERSION=1.14.0
-ARG PEFT_VERSION=0.20.0
 
 ########################################################################
-# gfx1201_base - keep the Aiter runtime JIT toolchain in the final image.
+# gfx1201_base - retain the exact framework stack from the vLLM base.
 ########################################################################
 FROM ${BASE_IMAGE} AS gfx1201_base
 
+ARG APT_MIRROR
+ARG PIP_INDEX_URL
+ARG UV_VERSION
 ARG ARG_PYTORCH_ROCM_ARCH=gfx1201
-ENV VIRTUAL_ENV=/opt/venv \
-    ROCM_PATH=/opt/rocm \
-    PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}
 
-RUN if [ -f /etc/apt/sources.list ]; then \
-        sed -i -E \
-            's|https?://archive.ubuntu.com/ubuntu/?|https://mirrors.ctyun.cn/ubuntu/|g; s|https?://security.ubuntu.com/ubuntu/?|https://mirrors.ctyun.cn/ubuntu/|g' \
-            /etc/apt/sources.list; \
-    fi \
-    && if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
-        sed -i -E \
-            's|https?://archive.ubuntu.com/ubuntu/?|https://mirrors.ctyun.cn/ubuntu/|g; s|https?://security.ubuntu.com/ubuntu/?|https://mirrors.ctyun.cn/ubuntu/|g' \
-            /etc/apt/sources.list.d/ubuntu.sources; \
-    fi \
+ENV DEBIAN_FRONTEND=noninteractive \
+    ROCM_PATH=/opt/rocm \
+    PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH} \
+    PIP_INDEX_URL=${PIP_INDEX_URL} \
+    UV_INDEX_URL=${PIP_INDEX_URL} \
+    UV_HTTP_TIMEOUT=500 \
+    UV_INDEX_STRATEGY=unsafe-best-match \
+    UV_LINK_MODE=copy \
+    AITER_USE_SYSTEM_TRITON=1
+
+RUN apt_mirror="${APT_MIRROR%/}" \
+    && for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+        if [ -f "${source_file}" ]; then \
+            sed -i -E \
+                "s|https?://(archive|security).ubuntu.com/ubuntu/?|${apt_mirror}/|g" \
+                "${source_file}"; \
+        fi; \
+    done \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
@@ -43,34 +52,25 @@ RUN if [ -f /etc/apt/sources.list ]; then \
         pkg-config \
         python3-dev \
     && rm -rf /var/lib/apt/lists/* \
-    && python3 -c 'import sys; assert sys.prefix == "/opt/venv" and sys.prefix != sys.base_prefix, f"PEP 668: expected /opt/venv Python, got {sys.executable} (prefix={sys.prefix}, base_prefix={sys.base_prefix})"' \
+    && python3 -m pip config --global set global.index-url "${PIP_INDEX_URL}" \
     && python3 -m pip install --no-cache-dir --upgrade pip \
-    && python3 -m pip config --site set \
-        global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
-    && python3 -m pip install --no-cache-dir 'setuptools<80' wheel
+    && python3 -m pip install --no-cache-dir \
+        "setuptools>=77.0.3,<80" wheel "uv==${UV_VERSION}"
 
-########################################################################
-# aiter_triton - provision the Triton version selected by pinned Aiter.
-########################################################################
-FROM gfx1201_base AS aiter_triton
-
-RUN --mount=type=bind,from=aiter_source,source=.,target=/aiter-source \
-    bash /aiter-source/.github/scripts/install_triton.sh \
-    && python3 -c 'from importlib.metadata import distributions; wanted={"amd-triton", "pytorch-triton", "pytorch-triton-rocm", "torch", "torchaudio", "torchvision", "triton", "triton-kernels", "triton-rocm"}; rows=[f"{name}=={dist.version}" for dist in distributions() if (name := dist.metadata["Name"].lower().replace("_", "-")) in wanted]; print("\n".join(sorted(rows)))' \
+# Freeze every binary package inherited from the base that is coupled to the
+# custom ROCm PyTorch/Triton build. Downstream dependency installs may use the
+# stack, but may not replace it with public PyPI wheels.
+RUN python3 -c 'from importlib.metadata import distributions; wanted={"amd-triton", "flash-attn", "flash-attn-3", "pytorch-triton", "pytorch-triton-rocm", "torch", "torchaudio", "torchvision", "triton", "triton-kernels", "triton-rocm"}; rows=[f"{name}=={dist.version}" for dist in distributions() if (name := dist.metadata["Name"].lower().replace("_", "-")) in wanted]; print("\n".join(sorted(set(rows))))' \
         > /opt/rocm-stack.constraints.txt \
     && grep -q '^torch==' /opt/rocm-stack.constraints.txt \
     && grep -Eqi '^(amd-triton|pytorch-triton|pytorch-triton-rocm|triton|triton-rocm)==' \
         /opt/rocm-stack.constraints.txt
 
-# setup.py must retain the Aiter-provisioned Triton in all child stages.
-ENV AITER_USE_SYSTEM_TRITON=1
-
 ########################################################################
-# build_aiter - build the pinned Aiter wheel without prebuilt kernels.
+# build_aiter - compile the current local Aiter source for gfx1201.
 ########################################################################
-FROM aiter_triton AS build_aiter
+FROM gfx1201_base AS build_aiter
 
-ARG AITER_REPO
 ARG AITER_COMMIT
 ARG AITER_VERSION
 ARG AITER_ROCM_ARCH
@@ -79,36 +79,37 @@ ENV MAX_JOBS=${MAX_JOBS}
 
 WORKDIR /app
 COPY --from=aiter_source . /app/aiter
+
 RUN cd /app/aiter \
-    && python3 -m pip install --no-cache-dir \
+    && rm -rf build dist \
+    && uv pip install --system \
         --constraint /opt/rocm-stack.constraints.txt \
         -r requirements.txt \
     && SETUPTOOLS_SCM_PRETEND_VERSION="${AITER_VERSION}" \
        PREBUILD_KERNELS=0 GPU_ARCHS="${AITER_ROCM_ARCH}" \
        python3 setup.py bdist_wheel --dist-dir=dist \
+    && test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1 \
     && mkdir -p /app/aiter-install \
     && cp dist/*.whl /app/aiter-install/
 
 ########################################################################
-# final - install Aiter, LightX2V source, then runtime dependencies.
+# final - install local Aiter, pinned Wan2.2 dependencies, and LightX2V.
 ########################################################################
-FROM aiter_triton AS final
+FROM gfx1201_base AS final
 
 ARG BASE_IMAGE
 ARG BASE_IMAGE_DIGEST=unknown
 ARG BASE_IMAGE_ID=unknown
+ARG BASE_IMAGE_SOURCE=unknown
+ARG LIGHTX2V_REVISION=unknown
 ARG AITER_REPO
 ARG AITER_COMMIT
 ARG AITER_VERSION
 ARG AITER_ROCM_ARCH
-ARG ACCELERATE_VERSION
-ARG PEFT_VERSION
 ARG ARG_PYTORCH_ROCM_ARCH=gfx1201
-ARG LIGHTX2V_REVISION=unknown
-ARG BASE_IMAGE_SOURCE=unknown
 
 LABEL org.opencontainers.image.title="LightX2V gfx1201"
-LABEL org.opencontainers.image.description="LightX2V Wan2.2 on ROCm/Aiter for AMD gfx1201"
+LABEL org.opencontainers.image.description="LightX2V Wan2.2 on the vLLM ROCm base with local Aiter"
 LABEL org.opencontainers.image.source="https://github.com/yangecool/LightX2V"
 LABEL org.opencontainers.image.revision="${LIGHTX2V_REVISION}"
 LABEL org.opencontainers.image.base.name="${BASE_IMAGE_SOURCE}"
@@ -126,55 +127,57 @@ ENV PLATFORM=amd_rocm \
     AITER_COMMIT=${AITER_COMMIT} \
     AITER_VERSION=${AITER_VERSION} \
     AITER_JIT_DIR=/workspace/.cache/aiter \
+    HSA_ENABLE_IPC_MODE_LEGACY=1 \
+    HIP_FORCE_DEV_KERNARG=1 \
+    PYTORCH_NVML_BASED_CUDA_CHECK=1 \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     SAFETENSORS_FAST_GPU=1
 
-# Replace any Aiter package inherited from the base image.
 RUN --mount=type=bind,from=build_aiter,src=/app/aiter-install,target=/aiter-install \
     python3 -m pip uninstall -y amd-aiter aiter 2>/dev/null || true \
-    && python3 -m pip install --no-cache-dir \
+    && uv pip install --system \
         --constraint /opt/rocm-stack.constraints.txt \
         /aiter-install/*.whl
 
-# Copy LightX2V source and install all ordinary runtime dependencies first.
 WORKDIR /workspace/LightX2V
 COPY . /workspace/LightX2V
-RUN sed -E '/^[[:space:]]*(torch|torchvision|torchaudio|sgl-kernel|accelerate|peft)([[:space:]]*[<=>~!].*)?([[:space:]]*#.*)?$/d' \
-        requirements.txt > /tmp/requirements.gfx1201.txt \
-    && python3 -m pip install --no-cache-dir \
+
+# This list contains only the runtime used by the Wan2.2 image. Deployment,
+# database, queue, cloud SDK, Gradio, and training dependencies stay out of the
+# image and therefore cannot force unrelated pydantic or aio package solves.
+RUN --mount=type=cache,id=lightx2v-gfx1201-uv,target=/root/.cache/uv \
+    uv pip install --system \
         --constraint /opt/rocm-stack.constraints.txt \
-        -r /tmp/requirements.gfx1201.txt \
-    && python3 -m pip install --no-cache-dir \
-        --constraint /opt/rocm-stack.constraints.txt \
-        'av' 'torchada>=0.1.10' \
+        -r dockerfiles/platforms/requirements_gfx1201.txt
+
+# These packages declare a generic PyTorch dependency. Their runtime
+# dependencies are already pinned above, so do not let them re-resolve the
+# custom ROCm framework stack.
+RUN --mount=type=cache,id=lightx2v-gfx1201-uv,target=/root/.cache/uv \
+    uv pip install --system --no-deps \
+        accelerate==1.13.0 \
+        peft==0.19.1 \
+        qtorch==0.3.0
+
+RUN uv pip install --system --no-deps --no-build-isolation -e . \
     && mkdir -p "${AITER_JIT_DIR}" \
-    && chmod 0777 "${AITER_JIT_DIR}" \
-    && rm -f /tmp/requirements.gfx1201.txt
-
-# Their dependencies are already present above. Installing these two pinned
-# packages without dependency resolution prevents pip from trying to replace
-# the image's custom ROCm Torch build with a package from PyPI.
-RUN python3 -m pip install --no-cache-dir --no-deps \
-        "accelerate==${ACCELERATE_VERSION}" \
-        "peft==${PEFT_VERSION}"
-
-# Install LightX2V from the copied source using its standard editable layout.
-RUN python3 -m pip install --no-cache-dir --no-build-isolation -e . --no-deps
+    && chmod 0777 "${AITER_JIT_DIR}"
 
 RUN mkdir -p /app \
     && { \
-        echo "BASE_IMAGE=${BASE_IMAGE_SOURCE}"; \
-        echo "BASE_IMAGE_REFERENCE=${BASE_IMAGE}"; \
-        echo "BASE_IMAGE_DIGEST=${BASE_IMAGE_DIGEST}"; \
-        echo "BASE_IMAGE_ID=${BASE_IMAGE_ID}"; \
+        echo "LIGHTX2V_IMAGE_BASE=${BASE_IMAGE_SOURCE}"; \
+        echo "LIGHTX2V_IMAGE_BASE_REFERENCE=${BASE_IMAGE}"; \
+        echo "LIGHTX2V_IMAGE_BASE_DIGEST=${BASE_IMAGE_DIGEST}"; \
+        echo "LIGHTX2V_IMAGE_BASE_ID=${BASE_IMAGE_ID}"; \
         echo "LIGHTX2V_REVISION=${LIGHTX2V_REVISION}"; \
         echo "AITER_REPO=${AITER_REPO}"; \
         echo "AITER_COMMIT=${AITER_COMMIT}"; \
         echo "AITER_VERSION=${AITER_VERSION}"; \
         echo "AITER_ROCM_ARCH=${AITER_ROCM_ARCH}"; \
         echo "PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}"; \
+        cat /opt/rocm-stack.constraints.txt; \
     } >> /app/versions.txt \
-    && python3 -c 'from importlib.metadata import version; print("AITER_INSTALLED_VERSION=" + version("amd-aiter")); print("ACCELERATE_VERSION=" + version("accelerate")); print("PEFT_VERSION=" + version("peft")); import triton; print("TRITON_VERSION=" + triton.__version__)' \
+    && python3 -c 'from importlib.metadata import version; print("AITER_INSTALLED_VERSION=" + version("amd-aiter")); print("ACCELERATE_VERSION=" + version("accelerate")); print("PEFT_VERSION=" + version("peft")); print("TRANSFORMERS_VERSION=" + version("transformers"))' \
         >> /app/versions.txt
 
 ENTRYPOINT []

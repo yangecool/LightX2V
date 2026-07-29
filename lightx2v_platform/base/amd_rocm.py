@@ -56,6 +56,7 @@ class AiterSglKernelCompat:
 
     def __init__(self, aiter_module):
         self._aiter = aiter_module
+        self._runtime_gfx = _runtime_gfx()
         missing = [
             name
             for name in ("gemm_a8w8", "pertoken_quant", "dtypes")
@@ -66,25 +67,19 @@ class AiterSglKernelCompat:
                 "Installed aiter is missing required public APIs: " + ", ".join(missing)
             )
 
-        # Use Aiter's public dispatcher so its architecture and tuned-shape
-        # selection remains the single source of truth.  Do not bind the CK
-        # implementation directly: that bypasses the dispatcher's tuning data.
         self._gemm_a8w8 = aiter_module.gemm_a8w8
-        self._runtime_gfx = _runtime_gfx()
-        self._gemm_a8w8_per_token_scale = None
+        self._gemm_backend = "public"
         if self._runtime_gfx.startswith("gfx1201"):
-            try:
-                from aiter.ops.triton.gemm.basic.gemm_a8w8_per_token_scale import (
-                    gemm_a8w8_per_token_scale,
+            ck_gemm = getattr(aiter_module, "gemm_a8w8_CK", None)
+            if ck_gemm is None:
+                raise ImportError(
+                    "Installed aiter is missing gemm_a8w8_CK required by gfx1201"
                 )
-
-                self._gemm_a8w8_per_token_scale = gemm_a8w8_per_token_scale
-            except ImportError as exc:
-                logger.warning(
-                    "Aiter gfx1201 per-token A8W8 kernel is unavailable; using "
-                    "the public A8W8 dispatcher: {}",
-                    exc,
-                )
+            # The CK wrapper consumes the same rowwise contract as fp8-sgl:
+            # activation scale [M, 1], weight scale [N, 1], weight [N, K].
+            # Its generated lookup also consumes a8w8_tuned_gemm.csv entries.
+            self._gemm_a8w8 = ck_gemm
+            self._gemm_backend = "ck-rowwise"
         self._pertoken_quant = aiter_module.pertoken_quant
         self._dtypes = aiter_module.dtypes
         self._rmsnorm2d_fwd = getattr(aiter_module, "rmsnorm2d_fwd", None)
@@ -99,10 +94,10 @@ class AiterSglKernelCompat:
                 f"got {self.rmsnorm_backend!r}"
             )
         logger.info(
-            "Using aiter as sgl_kernel backend (gfx={}, GEMM={}, per-token "
-            "FP8 quantization, RMSNorm backend={})",
+            "Using aiter as sgl_kernel backend (gfx={}, GEMM={}, "
+            "per-token FP8 quantization, RMSNorm backend={})",
             self._runtime_gfx or "unknown",
-            "gfx1201-per-token" if self._gemm_a8w8_per_token_scale else "public",
+            self._gemm_backend,
             self.rmsnorm_backend,
         )
 
@@ -134,8 +129,7 @@ class AiterSglKernelCompat:
                 f"{name} must be a vector or a row/column broadcast view, "
                 f"got shape={tuple(scale.shape)}"
             )
-        # Keep the original rank: Aiter's per-token kernel uses both strides
-        # for a 2D scale view. No allocation is needed in either form.
+        # CK consumes scale values as vectors; either rank is a zero-copy view.
         return scale
 
     def fp8_scaled_mm(self, input_quant, weight, input_scale, weight_scale, dtype, bias=None):
@@ -179,35 +173,11 @@ class AiterSglKernelCompat:
             raise ValueError(f"bias must be on {input_quant.device}, got {bias.device}")
 
         weight_nk = weight.transpose(-2, -1)
-        if self._gemm_a8w8_per_token_scale is not None and not weight_nk.is_contiguous():
+        if self._gemm_backend == "ck-rowwise" and not weight_nk.is_contiguous():
             raise ValueError(
-                "Aiter A8W8 requires the restored [N, K] weight view to be contiguous; "
+                "Aiter CK A8W8 requires the restored [N, K] weight view to be contiguous; "
                 "materialize the transpose once during checkpoint loading"
             )
-        if self._gemm_a8w8_per_token_scale is not None:
-            if input_scale.ndim == 2 and input_scale.shape != (m, 1):
-                raise ValueError(
-                    "gfx1201 per-token A8W8 requires input_scale shape [M, 1] or [M]"
-                )
-            if weight_scale.ndim == 2 and weight_scale.shape != (n, 1):
-                raise ValueError(
-                    "gfx1201 per-token A8W8 requires weight_scale shape [N, 1] or [N]"
-                )
-            # The kernel implementation reads stride(1), including for the
-            # documented vector form. Restore that implicit second dimension
-            # as a zero-copy view before crossing the Aiter boundary.
-            input_scale = input_scale.view(m, 1)
-            weight_scale = weight_scale.view(n, 1)
-            output = self._gemm_a8w8_per_token_scale(
-                input_quant,
-                weight_nk,
-                input_scale,
-                weight_scale,
-                dtype=dtype,
-            )
-            if bias is not None:
-                output.add_(bias)
-            return output
         return self._gemm_a8w8(input_quant, weight_nk, input_scale, weight_scale, bias, dtype)
 
     def int8_scaled_mm(self, input_quant, weight, input_scale, weight_scale, dtype, bias=None):
@@ -297,7 +267,7 @@ class AmdRocmDevice:
             hasattr(sgl_kernel._aiter, "flash_attn_varlen_func"),
             hasattr(sgl_kernel._aiter, "gemm_a8w8"),
             hasattr(sgl_kernel._aiter, "pertoken_quant"),
-            sgl_kernel._gemm_a8w8_per_token_scale is not None,
+            sgl_kernel._gemm_backend,
             sgl_kernel.rmsnorm_backend,
         )
 
