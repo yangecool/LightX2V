@@ -67,3 +67,4 @@ HuggingFace: https://huggingface.co/lightx2v
    Gradio部署 <deploy_guides/deploy_gradio.md>
    ComfyUI部署 <deploy_guides/deploy_comfyui.md>
    本地windows电脑部署 <deploy_guides/deploy_local_windows.md>
+   AMD ROCm GFX1201 Wan2.2 I2V <deploy_guides/amd_rocm_gfx1201_wan22_i2v.md>

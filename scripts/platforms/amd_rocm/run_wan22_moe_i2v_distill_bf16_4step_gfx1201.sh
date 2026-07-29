@@ -2,8 +2,10 @@
 set -euo pipefail
 
 lightx2v_path="${LIGHTX2V_PATH:-}"
+models_root="${MODELS_ROOT:-}"
 model_path="${MODEL_PATH:-}"
 : "${lightx2v_path:?Set LIGHTX2V_PATH to the LightX2V checkout}"
+: "${models_root:?Set MODELS_ROOT to the directory containing Wan-AI, lightx2v, and encoders}"
 : "${model_path:?Set MODEL_PATH to the Wan2.2 model root}"
 
 export PLATFORM=amd_rocm
@@ -14,6 +16,8 @@ export HIP_VISIBLE_DEVICES="${gpu_devices}"
 export CUDA_VISIBLE_DEVICES="${gpu_devices}"
 
 source "${lightx2v_path}/scripts/base/base.sh"
+
+cd "${models_root}"
 
 python -m lightx2v.infer \
     --model_cls wan2.2_moe_distill \
