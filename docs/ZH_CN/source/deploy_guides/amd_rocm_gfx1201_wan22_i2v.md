@@ -41,7 +41,7 @@ HTTPS_PROXY=http://127.0.0.1:10808/ \
 bash dockerfiles/platforms/build_gfx1201.sh
 ```
 
-构建脚本会校验本地 LightX2V/AITER 工作树干净、AITER HEAD 等于 Dockerfile 固定的 `AITER_COMMIT`，并确认所有 submodule 已初始化且处于固定 revision；随后通过独立的 BuildKit `aiter_source` context 将源码交给 Dockerfile。LightX2V 仍使用主 build context 的 `COPY`。`AITER_SOURCE_DIR` 只用于覆盖默认的 sibling 目录位置，不改变 commit 校验。`HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 仅在调用者显式设置时作为 Docker 预定义 build args 转发；Dockerfile 不声明或持久化代理配置。
+构建脚本会校验本地 LightX2V/AITER 工作树干净、AITER HEAD 等于 Dockerfile 固定的 `AITER_COMMIT`，并确认所有 submodule 已初始化且处于固定 revision；基础镜像会从本地 tag 解析为 BuildKit 可用于 `FROM` 的 `repository@sha256:digest`，本地 image ID 只写入版本记录。随后脚本通过独立的 BuildKit `aiter_source` context 将源码交给 Dockerfile。LightX2V 仍使用主 build context 的 `COPY`。`AITER_SOURCE_DIR` 只用于覆盖默认的 sibling 目录位置，不改变 commit 校验。`HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 仅在调用者显式设置时作为 Docker 预定义 build args 转发；Dockerfile 不声明或持久化代理配置。
 
 Dockerfile 直接调用该固定 AITER 源码中的 `.github/scripts/install_triton.sh`，AITER wheel 构建层和最终运行层继承同一个 Triton 层。最终镜像同时保留 `hipcc` 所需的 C/C++、Python headers、CMake 和 Ninja 环境，用于 AITER 首次运行时 JIT；不会继承基础镜像中未经 AITER 选择的 Triton，也不会把完整 AITER 源码留在最终层。
 

@@ -75,6 +75,8 @@ RUN cd /app/aiter \
 FROM aiter_triton AS final
 
 ARG BASE_IMAGE
+ARG BASE_IMAGE_DIGEST=unknown
+ARG BASE_IMAGE_ID=unknown
 ARG AITER_REPO
 ARG AITER_COMMIT
 ARG AITER_ROCM_ARCH
@@ -87,7 +89,7 @@ LABEL org.opencontainers.image.description="LightX2V Wan2.2 on ROCm/Aiter for AM
 LABEL org.opencontainers.image.source="https://github.com/yangecool/LightX2V"
 LABEL org.opencontainers.image.revision="${LIGHTX2V_REVISION}"
 LABEL org.opencontainers.image.base.name="${BASE_IMAGE_SOURCE}"
-LABEL org.opencontainers.image.base.digest="${BASE_IMAGE}"
+LABEL org.opencontainers.image.base.digest="${BASE_IMAGE_DIGEST}"
 LABEL org.opencontainers.image.aiter.revision="${AITER_COMMIT}"
 
 ENV PLATFORM=amd_rocm \
@@ -131,7 +133,9 @@ RUN sed -E '/^[[:space:]]*(torch|torchvision|torchaudio|sgl-kernel)([[:space:]]*
 RUN mkdir -p /app \
     && { \
         echo "BASE_IMAGE=${BASE_IMAGE_SOURCE}"; \
-        echo "BASE_IMAGE_ID=${BASE_IMAGE}"; \
+        echo "BASE_IMAGE_REFERENCE=${BASE_IMAGE}"; \
+        echo "BASE_IMAGE_DIGEST=${BASE_IMAGE_DIGEST}"; \
+        echo "BASE_IMAGE_ID=${BASE_IMAGE_ID}"; \
         echo "LIGHTX2V_REVISION=${LIGHTX2V_REVISION}"; \
         echo "AITER_REPO=${AITER_REPO}"; \
         echo "AITER_COMMIT=${AITER_COMMIT}"; \

@@ -56,6 +56,16 @@ if [[ -z "${base_image_id}" || "${base_image_id}" != sha256:* ]]; then
     echo "Unable to resolve ${base_image_source} to an immutable local image ID" >&2
     exit 1
 fi
+if ! base_image_reference="$(docker image inspect --format '{{if .RepoDigests}}{{index .RepoDigests 0}}{{end}}' "${base_image_source}")"; then
+    echo "Unable to inspect the registry digest for ${base_image_source}" >&2
+    exit 1
+fi
+if [[ -z "${base_image_reference}" || "${base_image_reference}" != *@sha256:* ]]; then
+    echo "The local base image has no usable RepoDigest: ${base_image_source}" >&2
+    echo "Pull the tagged image from its registry before building." >&2
+    exit 1
+fi
+base_image_digest="${base_image_reference##*@}"
 
 if [[ -n "$(git -C "${lightx2v_dir}" status --porcelain)" ]]; then
     echo "Local LightX2V worktree must be clean before it is copied into the image" >&2
@@ -64,6 +74,8 @@ fi
 
 echo "============================================================"
 echo "BASE_IMAGE_SOURCE   = ${base_image_source}"
+echo "BASE_IMAGE_REFERENCE= ${base_image_reference}"
+echo "BASE_IMAGE_DIGEST   = ${base_image_digest}"
 echo "BASE_IMAGE_ID       = ${base_image_id}"
 echo "LIGHTX2V_REVISION   = ${lightx2v_revision}"
 echo "PYTORCH_ROCM_ARCH   = ${pytorch_rocm_arch}"
@@ -81,8 +93,10 @@ DOCKER_BUILDKIT=1 docker build \
     --file "${script_dir}/Dockerfile_gfx1201" \
     --tag "${image_tag}" \
     --build-context "aiter_source=${aiter_source_dir}" \
-    --build-arg "BASE_IMAGE=${base_image_id}" \
+    --build-arg "BASE_IMAGE=${base_image_reference}" \
     --build-arg "BASE_IMAGE_SOURCE=${base_image_source}" \
+    --build-arg "BASE_IMAGE_DIGEST=${base_image_digest}" \
+    --build-arg "BASE_IMAGE_ID=${base_image_id}" \
     --build-arg "ARG_PYTORCH_ROCM_ARCH=${pytorch_rocm_arch}" \
     --build-arg "AITER_ROCM_ARCH=${aiter_rocm_arch}" \
     --build-arg "AITER_REPO=${aiter_repo}" \
@@ -93,4 +107,4 @@ DOCKER_BUILDKIT=1 docker build \
     --progress=plain \
     "${lightx2v_dir}"
 
-echo "Built ${image_tag} from ${base_image_id}"
+echo "Built ${image_tag} from ${base_image_reference} (${base_image_id})"
