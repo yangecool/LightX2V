@@ -3,7 +3,7 @@
 # FlashAttention. Aiter and LightX2V are rebuilt from local source contexts.
 ARG BASE_IMAGE=vllm/vllm-openai-rocm:v0.25.0-base
 ARG APT_MIRROR=https://mirrors.ctyun.cn/ubuntu
-ARG PIP_INDEX_URL=https://mirrors.ctyun.cn/pypi/simple
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG UV_VERSION=0.11.32
 ARG AITER_REPO=https://github.com/yangecool/aiter.git
 ARG AITER_COMMIT=unknown
@@ -30,14 +30,29 @@ ENV DEBIAN_FRONTEND=noninteractive \
     UV_LINK_MODE=copy \
     AITER_USE_SYSTEM_TRITON=1
 
-RUN apt_mirror="${APT_MIRROR%/}" \
-    && for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
+RUN . /etc/os-release \
+    && test -n "${VERSION_CODENAME:-}" \
+    && apt_mirror="${APT_MIRROR%/}" \
+    && printf 'deb %s %s main universe restricted multiverse\ndeb %s %s-updates main universe restricted multiverse\ndeb %s %s-backports main universe restricted multiverse\ndeb %s %s-security main universe restricted multiverse\n' \
+        "${apt_mirror}" "${VERSION_CODENAME}" \
+        "${apt_mirror}" "${VERSION_CODENAME}" \
+        "${apt_mirror}" "${VERSION_CODENAME}" \
+        "${apt_mirror}" "${VERSION_CODENAME}" \
+        > /etc/apt/sources.list \
+    && rm -f /etc/apt/sources.list.d/ubuntu.sources \
+    && for source_file in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do \
         if [ -f "${source_file}" ]; then \
             sed -i -E \
-                "s|https?://(archive|security).ubuntu.com/ubuntu/?|${apt_mirror}/|g" \
+                "s|https?://[^[:space:]]*((archive|security)\\.ubuntu\\.com)/ubuntu/?|${apt_mirror}/|g" \
                 "${source_file}"; \
         fi; \
     done \
+    && if grep -H -E 'https?://[^[:space:]]*(archive|security)\.ubuntu\.com' \
+        /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources \
+        2>/dev/null; then \
+        echo "Ubuntu mirror replacement left an official archive endpoint" >&2; \
+        exit 1; \
+    fi \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
