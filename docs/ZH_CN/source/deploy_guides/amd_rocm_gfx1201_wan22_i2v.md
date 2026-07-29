@@ -1,8 +1,8 @@
 # AMD ROCm GFX1201 上的 Wan2.2 I2V
 
-本文只描述 `gfx1201-hvat-scratch` 分支中已经配置的单卡 Wan2.2 I2V 管线。所有配置均使用 AITER 注意力、Torch RMSNorm/RoPE，并关闭多卡并行。
+本文只描述 `gfx1201-hvat-scratch` 分支中已经配置的单卡 Wan2.2 I2V 管线。目标卡为 32 GB 显存、原生支持 E4M3/E5M2 FP8 矩阵计算的 AMD RDNA4/GFX1201。所有配置均使用 AITER 注意力、Torch RMSNorm/RoPE，并关闭多卡并行。
 
-> `R9600/GFX1201` 标准 40 步配置来自上游 `wan_moe_i2v_4090.json` 的低显存思路，但尚未进行镜像或硬件验证。它是待验证配置，不代表已经确认能在目标显存容量内完成 720p/81 帧生成。
+> 所有 GFX1201 配置尚未进行镜像或硬件验证。32 GB 和原生 FP8 能力使蒸馏 FP8 成为最合理的首测管线，但不代表已经确认能在 32 GB 内完成 720p/81 帧生成。
 
 ## 支持矩阵
 
@@ -13,6 +13,18 @@
 | 蒸馏 FP8 I2V | `wan2.2_moe_distill` | 4 | `Wan2.2-Distill-Models` 的 high/low scaled FP8 权重 | 已配置，待硬件验证 |
 
 当前没有为 GFX1201 提供 T2V、LoRA、INT8、ComfyUI 权重或多卡配置。源码中存在这些能力并不等于本分支的 GFX1201 配置已经覆盖它们。
+
+## 32 GB GFX1201 验证顺序
+
+1. 首先验证蒸馏 FP8 4 步。它使用 E4M3 scaled FP8 DiT、FP8 T5、AITER attention 和 AITER FP8 GEMM，是最匹配该卡硬件能力的管线。
+2. FP8 通过后再验证蒸馏 BF16 4 步。BF16 配置使用 phase offload，速度会明显低于 FP8 主路径，并需要更多主机内存。
+3. 最后验证标准 BF16 40 步。它主要用于确认非蒸馏原始模型兼容性，不适合作为性能或首次成功标准。
+
+上游文档记录的 720p/81 帧蒸馏 FP8 单卡 offload 峰值为 `29250 MiB`，但该数据来自 H100，不能直接等同于 ROCm/AITER 的显存占用。相对 32 GB 显存，它只有约 3.5 GiB 的名义余量，ROCm allocator、AITER workspace 或算子实现差异都可能消耗这部分空间。
+
+当前 FP8 配置使用 `offload_granularity=model`：每个阶段只把当前约 15 GB 的 high-noise 或 low-noise FP8 DiT 放到 GPU，另一份保留在 CPU。这是性能优先配置。如果首次运行 OOM，第一降级项是保持 FP8 权重并把配置临时改为 `offload_granularity=phase`；确认 phase offload 能完成后，再分析是否恢复 model offload。不要把切换 BF16 当作第一降级手段，因为 BF16 会增加权重存储、主机内存和传输量。
+
+主机需要同时容纳模型权重、offload buffer、T5、VAE 和运行时内存。FP8 首测建议至少准备 64 GB 主机内存；BF16 phase offload 和标准 40 步建议优先使用 128 GB 主机内存。
 
 ## `wan_moe_i2v_4090.json` 的意义
 
@@ -28,7 +40,7 @@
 
 `configs/platforms/amd_rocm/wan22_moe_i2v_bf16_40step_r9600_gfx1201.json`
 
-该配置同时卸载 T5 和 VAE。phase offload 会显著增加主机内存占用和 PCIe 数据传输，建议镜像验证时同时记录 GPU 峰值显存、主机峰值内存和单步耗时。
+该配置同时卸载 T5 和 VAE。phase offload 会显著增加主机内存占用和 PCIe 数据传输，建议镜像验证时同时记录 GPU 峰值显存、主机峰值内存和单步耗时。它是 32 GB 卡上的兼容性补充，不是推荐的首测或性能管线。
 
 ## 模型目录
 
