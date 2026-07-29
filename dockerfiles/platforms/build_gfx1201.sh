@@ -12,10 +12,18 @@ aiter_rocm_arch="${AITER_ROCM_ARCH:-gfx1201}"
 aiter_repo="${AITER_REPO:-https://github.com/yangecool/aiter.git}"
 aiter_commit="${AITER_COMMIT:-1b37c33172ea807d528de91c7b4f8f74ff61ec44}"
 max_jobs="${MAX_JOBS:-$(nproc)}"
-http_proxy="${HTTP_PROXY:-http://127.0.0.1:10808/}"
-https_proxy="${HTTPS_PROXY:-http://127.0.0.1:10808/}"
-no_proxy="${NO_PROXY:-localhost,127.0.0.1}"
 lightx2v_revision="$(git -C "${lightx2v_dir}" rev-parse HEAD)"
+
+proxy_build_args=()
+if [[ -n "${HTTP_PROXY:-}" ]]; then
+    proxy_build_args+=(--build-arg "HTTP_PROXY=${HTTP_PROXY}")
+fi
+if [[ -n "${HTTPS_PROXY:-}" ]]; then
+    proxy_build_args+=(--build-arg "HTTPS_PROXY=${HTTPS_PROXY}")
+fi
+if [[ -n "${NO_PROXY:-}" ]]; then
+    proxy_build_args+=(--build-arg "NO_PROXY=${NO_PROXY}")
+fi
 
 if [[ ! -d "${aiter_source_dir}" ]]; then
     echo "Local Aiter source directory does not exist: ${aiter_source_dir}" >&2
@@ -81,9 +89,7 @@ DOCKER_BUILDKIT=1 docker build \
     --build-arg "AITER_COMMIT=${aiter_commit}" \
     --build-arg "MAX_JOBS=${max_jobs}" \
     --build-arg "LIGHTX2V_REVISION=${lightx2v_revision}" \
-    --build-arg "HTTP_PROXY=${http_proxy}" \
-    --build-arg "HTTPS_PROXY=${https_proxy}" \
-    --build-arg "NO_PROXY=${no_proxy}" \
+    "${proxy_build_args[@]}" \
     --progress=plain \
     "${lightx2v_dir}"
 
