@@ -27,7 +27,10 @@ LightX2V-ROCm-GFX1201/
 构建前在宿主机初始化 AITER submodule：
 
 ```bash
-git -C ../aiter submodule update --init --recursive
+git -C ../aiter \
+  -c http.proxy=http://127.0.0.1:10808 \
+  -c https.proxy=http://127.0.0.1:10808 \
+  submodule update --init --recursive
 ```
 
 然后从 LightX2V 仓库执行：
@@ -36,7 +39,9 @@ git -C ../aiter submodule update --init --recursive
 bash dockerfiles/platforms/build_gfx1201.sh
 ```
 
-构建脚本会校验本地 AITER 工作树干净、HEAD 等于 Dockerfile 固定的 `AITER_COMMIT`，并确认所有 submodule 已初始化且处于固定 revision；随后通过独立的 BuildKit `aiter_source` context 将源码交给 Dockerfile。LightX2V 仍使用主 build context 的 `COPY`。`AITER_SOURCE_DIR` 只用于覆盖默认的 sibling 目录位置，不改变 commit 校验。
+构建脚本会校验本地 LightX2V/AITER 工作树干净、AITER HEAD 等于 Dockerfile 固定的 `AITER_COMMIT`，并确认所有 submodule 已初始化且处于固定 revision；随后通过独立的 BuildKit `aiter_source` context 将源码交给 Dockerfile。LightX2V 仍使用主 build context 的 `COPY`。`AITER_SOURCE_DIR` 只用于覆盖默认的 sibling 目录位置，不改变 commit 校验。
+
+Dockerfile 直接调用该固定 AITER 源码中的 `.github/scripts/install_triton.sh`，AITER wheel 构建层和最终运行层继承同一个 Triton 层。最终镜像同时保留 `hipcc` 所需的 C/C++、Python headers、CMake 和 Ninja 环境，用于 AITER 首次运行时 JIT；不会继承基础镜像中未经 AITER 选择的 Triton，也不会把完整 AITER 源码留在最终层。
 
 ## 32 GB GFX1201 验证顺序
 

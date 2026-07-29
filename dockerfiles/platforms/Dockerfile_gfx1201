@@ -7,9 +7,50 @@ ARG AITER_COMMIT=1b37c33172ea807d528de91c7b4f8f74ff61ec44
 ARG AITER_ROCM_ARCH=gfx1201
 
 ########################################################################
+# gfx1201_base - keep the Aiter runtime JIT toolchain in the final image.
+########################################################################
+FROM ${BASE_IMAGE} AS gfx1201_base
+
+ARG ARG_PYTORCH_ROCM_ARCH=gfx1201
+ENV ROCM_PATH=/opt/rocm \
+    PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        ffmpeg \
+        git \
+        libgl1 \
+        libglib2.0-0 \
+        libsm6 \
+        libxext6 \
+        pkg-config \
+        python3-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --no-cache-dir 'setuptools<80' wheel
+
+########################################################################
+# aiter_triton - provision the Triton version selected by pinned Aiter.
+########################################################################
+FROM gfx1201_base AS aiter_triton
+
+RUN --mount=type=bind,from=aiter_source,source=.,target=/aiter-source \
+    bash /aiter-source/.github/scripts/install_triton.sh \
+    && python3 -c 'from importlib.metadata import distributions; wanted={"amd-triton", "pytorch-triton", "pytorch-triton-rocm", "torch", "torchaudio", "torchvision", "triton", "triton-kernels", "triton-rocm"}; rows=[f"{name}=={dist.version}" for dist in distributions() if (name := dist.metadata["Name"].lower().replace("_", "-")) in wanted]; print("\n".join(sorted(rows)))' \
+        > /opt/rocm-stack.constraints.txt \
+    && grep -q '^torch==' /opt/rocm-stack.constraints.txt \
+    && grep -Eqi '^(amd-triton|pytorch-triton|pytorch-triton-rocm|triton|triton-rocm)==' \
+        /opt/rocm-stack.constraints.txt
+
+# setup.py must retain the Aiter-provisioned Triton in all child stages.
+ENV AITER_USE_SYSTEM_TRITON=1
+
+########################################################################
 # build_aiter - build the pinned Aiter wheel without prebuilt kernels.
 ########################################################################
-FROM ${BASE_IMAGE} AS build_aiter
+FROM aiter_triton AS build_aiter
 
 ARG AITER_REPO
 ARG AITER_COMMIT
@@ -20,8 +61,10 @@ ENV MAX_JOBS=${MAX_JOBS}
 WORKDIR /app
 COPY --from=aiter_source . /app/aiter
 RUN cd /app/aiter \
-    && python3 -m pip install --no-cache-dir -r requirements.txt \
-    && GPU_ARCHS="${AITER_ROCM_ARCH}" \
+    && python3 -m pip install --no-cache-dir \
+        --constraint /opt/rocm-stack.constraints.txt \
+        -r requirements.txt \
+    && PREBUILD_KERNELS=0 GPU_ARCHS="${AITER_ROCM_ARCH}" \
        python3 setup.py bdist_wheel --dist-dir=dist \
     && mkdir -p /app/aiter-install \
     && cp dist/*.whl /app/aiter-install/
@@ -29,8 +72,9 @@ RUN cd /app/aiter \
 ########################################################################
 # final - install Aiter, LightX2V source, then runtime dependencies.
 ########################################################################
-FROM ${BASE_IMAGE} AS final
+FROM aiter_triton AS final
 
+ARG BASE_IMAGE
 ARG AITER_REPO
 ARG AITER_COMMIT
 ARG AITER_ROCM_ARCH
@@ -43,6 +87,7 @@ LABEL org.opencontainers.image.description="LightX2V Wan2.2 on ROCm/Aiter for AM
 LABEL org.opencontainers.image.source="https://github.com/yangecool/LightX2V"
 LABEL org.opencontainers.image.revision="${LIGHTX2V_REVISION}"
 LABEL org.opencontainers.image.base.name="${BASE_IMAGE_SOURCE}"
+LABEL org.opencontainers.image.base.digest="${BASE_IMAGE}"
 LABEL org.opencontainers.image.aiter.revision="${AITER_COMMIT}"
 
 ENV PLATFORM=amd_rocm \
@@ -60,39 +105,40 @@ ENV PLATFORM=amd_rocm \
 # Replace any Aiter package inherited from the base image.
 RUN --mount=type=bind,from=build_aiter,src=/app/aiter-install,target=/aiter-install \
     python3 -m pip uninstall -y amd-aiter aiter 2>/dev/null || true \
-    && python3 -m pip install --no-cache-dir /aiter-install/*.whl
+    && python3 -m pip install --no-cache-dir \
+        --constraint /opt/rocm-stack.constraints.txt \
+        /aiter-install/*.whl
 
 # Install LightX2V from source before resolving its runtime dependencies.
 WORKDIR /workspace/LightX2V
 COPY . /workspace/LightX2V
-RUN python3 -m pip install --no-cache-dir -e . --no-deps
+RUN python3 -m pip install --no-cache-dir --no-build-isolation -e . --no-deps
 
-# Install system and Python runtime dependencies last. Keep the ROCm torch
-# family from the base image and use Aiter in place of the CUDA sgl-kernel.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ffmpeg \
-        git \
-        libgl1 \
-        libglib2.0-0 \
-        libsm6 \
-        libxext6 \
-    && rm -rf /var/lib/apt/lists/* \
-    && sed -E '/^(torch|torchvision|torchaudio|sgl-kernel)([<=>~!].*)?$/d' requirements.txt > /tmp/requirements.gfx1201.txt \
-    && python3 -m pip install --no-cache-dir -r /tmp/requirements.gfx1201.txt \
-    && python3 -m pip install --no-cache-dir 'av' 'pytest' 'torchada>=0.1.10' \
+# Install Python runtime dependencies last. Constraints make an indirect
+# dependency conflict fail instead of replacing the ROCm torch/Triton stack.
+RUN sed -E '/^[[:space:]]*(torch|torchvision|torchaudio|sgl-kernel)([[:space:]]*[<=>~!].*)?([[:space:]]*#.*)?$/d' \
+        requirements.txt > /tmp/requirements.gfx1201.txt \
+    && python3 -m pip install --no-cache-dir \
+        --constraint /opt/rocm-stack.constraints.txt \
+        -r /tmp/requirements.gfx1201.txt \
+    && python3 -m pip install --no-cache-dir \
+        --constraint /opt/rocm-stack.constraints.txt \
+        'av' 'torchada>=0.1.10' \
     && mkdir -p "${AITER_JIT_DIR}" \
-    && chmod 0777 "${AITER_JIT_DIR}"
+    && chmod 0777 "${AITER_JIT_DIR}" \
+    && rm -f /tmp/requirements.gfx1201.txt
 
 RUN mkdir -p /app \
     && { \
         echo "BASE_IMAGE=${BASE_IMAGE_SOURCE}"; \
+        echo "BASE_IMAGE_ID=${BASE_IMAGE}"; \
         echo "LIGHTX2V_REVISION=${LIGHTX2V_REVISION}"; \
         echo "AITER_REPO=${AITER_REPO}"; \
         echo "AITER_COMMIT=${AITER_COMMIT}"; \
         echo "AITER_ROCM_ARCH=${AITER_ROCM_ARCH}"; \
         echo "PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}"; \
-    } >> /app/versions.txt
+    } >> /app/versions.txt \
+    && python3 -c 'import triton; print("TRITON_VERSION=" + triton.__version__)' >> /app/versions.txt
 
 ENTRYPOINT []
 CMD ["bash"]
