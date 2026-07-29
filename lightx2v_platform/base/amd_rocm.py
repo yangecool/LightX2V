@@ -7,6 +7,7 @@ This module handles AMD-specific optimizations including:
 - sgl_kernel compatibility layer using aiter library (required on AMD)
 """
 
+import os
 import sys
 
 import torch
@@ -19,8 +20,10 @@ from lightx2v_platform.registry_factory import PLATFORM_DEVICE_REGISTER
 IS_AMD_ROCM = hasattr(torch.version, "hip") and torch.version.hip is not None
 
 # aiter installation info
-AITER_REPO = "https://github.com/ROCm/aiter.git"
-AITER_COMMIT = "a7d3bf8cd47afbaf6a6133c1f12e3b01d2c27b0e"
+AITER_REPO = os.getenv("AITER_REPO", "https://github.com/yangecool/aiter.git")
+AITER_COMMIT = os.getenv(
+    "AITER_COMMIT", "1b37c33172ea807d528de91c7b4f8f74ff61ec44"
+)
 AITER_INSTALL_CMD = f"""
 # One-line install command for aiter (AMD ROCm optimized kernels):
 git clone {AITER_REPO} /tmp/aiter && \\
@@ -28,6 +31,16 @@ cd /tmp/aiter && \\
 git checkout {AITER_COMMIT} && \\
 pip install -e .
 """
+
+
+def _runtime_gfx() -> str:
+    """Return the normalized HIP architecture without requiring a GPU at import."""
+    try:
+        device = torch.cuda.current_device()
+        name = torch.cuda.get_device_properties(device).gcnArchName
+    except Exception:
+        return ""
+    return str(name).lower().split(":", 1)[0]
 
 
 class AiterSglKernelCompat:
@@ -43,27 +56,167 @@ class AiterSglKernelCompat:
 
     def __init__(self, aiter_module):
         self._aiter = aiter_module
-        self._gemm_a8w8 = aiter_module.gemm_a8w8_CK
+        missing = [
+            name
+            for name in ("gemm_a8w8", "pertoken_quant", "dtypes")
+            if not hasattr(aiter_module, name)
+        ]
+        if missing:
+            raise ImportError(
+                "Installed aiter is missing required public APIs: " + ", ".join(missing)
+            )
+
+        # Use Aiter's public dispatcher so its architecture and tuned-shape
+        # selection remains the single source of truth.  Do not bind the CK
+        # implementation directly: that bypasses the dispatcher's tuning data.
+        self._gemm_a8w8 = aiter_module.gemm_a8w8
+        self._runtime_gfx = _runtime_gfx()
+        self._gemm_a8w8_per_token_scale = None
+        if self._runtime_gfx.startswith("gfx1201"):
+            try:
+                from aiter.ops.triton.gemm.basic.gemm_a8w8_per_token_scale import (
+                    gemm_a8w8_per_token_scale,
+                )
+
+                self._gemm_a8w8_per_token_scale = gemm_a8w8_per_token_scale
+            except ImportError as exc:
+                logger.warning(
+                    "Aiter gfx1201 per-token A8W8 kernel is unavailable; using "
+                    "the public A8W8 dispatcher: {}",
+                    exc,
+                )
         self._pertoken_quant = aiter_module.pertoken_quant
         self._dtypes = aiter_module.dtypes
-        self._rms_norm = aiter_module.rms_norm
-        logger.info("Using aiter as sgl_kernel backend (AMD ROCm optimized)")
+        self._rmsnorm2d_fwd = getattr(aiter_module, "rmsnorm2d_fwd", None)
+        self._rms_norm = getattr(aiter_module, "rms_norm", None)
+        if self._rmsnorm2d_fwd is None and self._rms_norm is None:
+            raise ImportError("Installed aiter has no RMSNorm public API")
 
-    def rmsnorm(self, input, weight, eps):
-        """RMSNorm compatible with sgl_kernel.rmsnorm(input, weight, eps)"""
+        self.rmsnorm_backend = os.getenv("LIGHTX2V_AMD_RMSNORM_BACKEND", "aiter")
+        if self.rmsnorm_backend not in {"aiter", "ck"}:
+            raise ValueError(
+                "LIGHTX2V_AMD_RMSNORM_BACKEND must be 'aiter' or 'ck', "
+                f"got {self.rmsnorm_backend!r}"
+            )
+        logger.info(
+            "Using aiter as sgl_kernel backend (gfx={}, GEMM={}, per-token "
+            "FP8 quantization, RMSNorm backend={})",
+            self._runtime_gfx or "unknown",
+            "gfx1201-per-token" if self._gemm_a8w8_per_token_scale else "public",
+            self.rmsnorm_backend,
+        )
+
+    def rmsnorm(self, input, weight, eps, enable_pdl=False):
+        """RMSNorm compatible with sgl_kernel, including NVIDIA's PDL keyword.
+
+        PDL is not an AMD execution flag.  It is accepted at this boundary so
+        the model does not need an architecture-specific call site.  Aiter's
+        shape-aware public wrapper is preferred because it selects the portable
+        HIP/Triton path for supported hidden sizes; the raw CK entry is opt-in.
+        """
+        del enable_pdl
+        if self.rmsnorm_backend == "aiter" and self._rmsnorm2d_fwd is not None:
+            return self._rmsnorm2d_fwd(input, weight, eps, 0)
+        if self._rms_norm is None:
+            raise RuntimeError("Aiter CK RMSNorm entry is unavailable")
         return self._rms_norm(input, weight, eps)
 
+    @staticmethod
+    def _normalize_scale(scale, expected, name):
+        if not isinstance(scale, torch.Tensor):
+            raise TypeError(f"{name} must be a torch.Tensor, got {type(scale).__name__}")
+        if scale.ndim not in (1, 2) or scale.numel() != expected:
+            raise ValueError(
+                f"{name} must contain {expected} scale values, got shape={tuple(scale.shape)}"
+            )
+        if scale.ndim == 2 and 1 not in scale.shape:
+            raise ValueError(
+                f"{name} must be a vector or a row/column broadcast view, "
+                f"got shape={tuple(scale.shape)}"
+            )
+        # Keep the original rank: Aiter's per-token kernel uses both strides
+        # for a 2D scale view. No allocation is needed in either form.
+        return scale
+
     def fp8_scaled_mm(self, input_quant, weight, input_scale, weight_scale, dtype, bias=None):
-        """FP8 GEMM compatible with sgl_kernel.fp8_scaled_mm"""
-        return self._gemm_a8w8(input_quant, weight, input_scale, weight_scale, bias, dtype)
+        """FP8 GEMM compatible with ``sgl_kernel.fp8_scaled_mm``.
+
+        SGL exposes weights as ``[K, N]`` while Aiter's public A8W8 API uses
+        ``[N, K]`` and transposes it internally.  The second transpose below
+        restores the Aiter contract without copying the checkpoint tensor when
+        LightX2V's normal ``[N, K].t()`` view is used.
+        """
+        if input_quant.ndim != 2 or weight.ndim != 2:
+            raise ValueError(
+                f"A8W8 expects 2D matrices, got input={input_quant.ndim}D weight={weight.ndim}D"
+            )
+        m, k = input_quant.shape
+        k_weight, n = weight.shape
+        if k != k_weight:
+            raise ValueError(
+                f"A8W8 K mismatch: input shape={tuple(input_quant.shape)}, "
+                f"SGL weight shape={tuple(weight.shape)}"
+            )
+        input_scale = self._normalize_scale(input_scale, m, "input_scale")
+        weight_scale = self._normalize_scale(weight_scale, n, "weight_scale")
+        for tensor, name in (
+            (weight, "weight"),
+            (input_scale, "input_scale"),
+            (weight_scale, "weight_scale"),
+        ):
+            if tensor.device != input_quant.device:
+                raise ValueError(
+                    f"{name} must be on {input_quant.device}, got {tensor.device}"
+                )
+        if input_scale.dtype != torch.float32 or weight_scale.dtype != torch.float32:
+            raise ValueError(
+                "A8W8 scales must be float32, got "
+                f"input_scale={input_scale.dtype} weight_scale={weight_scale.dtype}"
+            )
+        if bias is not None and (bias.ndim != 1 or bias.numel() != n):
+            raise ValueError(f"bias must have shape [{n}], got {tuple(bias.shape)}")
+        if bias is not None and bias.device != input_quant.device:
+            raise ValueError(f"bias must be on {input_quant.device}, got {bias.device}")
+
+        weight_nk = weight.transpose(-2, -1)
+        if self._gemm_a8w8_per_token_scale is not None and not weight_nk.is_contiguous():
+            raise ValueError(
+                "Aiter A8W8 requires the restored [N, K] weight view to be contiguous; "
+                "materialize the transpose once during checkpoint loading"
+            )
+        if self._gemm_a8w8_per_token_scale is not None:
+            if input_scale.ndim == 2 and input_scale.shape != (m, 1):
+                raise ValueError(
+                    "gfx1201 per-token A8W8 requires input_scale shape [M, 1] or [M]"
+                )
+            if weight_scale.ndim == 2 and weight_scale.shape != (n, 1):
+                raise ValueError(
+                    "gfx1201 per-token A8W8 requires weight_scale shape [N, 1] or [N]"
+                )
+            # The kernel implementation reads stride(1), including for the
+            # documented vector form. Restore that implicit second dimension
+            # as a zero-copy view before crossing the Aiter boundary.
+            input_scale = input_scale.view(m, 1)
+            weight_scale = weight_scale.view(n, 1)
+            output = self._gemm_a8w8_per_token_scale(
+                input_quant,
+                weight_nk,
+                input_scale,
+                weight_scale,
+                dtype=dtype,
+            )
+            if bias is not None:
+                output.add_(bias)
+            return output
+        return self._gemm_a8w8(input_quant, weight_nk, input_scale, weight_scale, bias, dtype)
 
     def int8_scaled_mm(self, input_quant, weight, input_scale, weight_scale, dtype, bias=None):
         """INT8 GEMM compatible with sgl_kernel.int8_scaled_mm"""
-        return self._gemm_a8w8(input_quant, weight, input_scale, weight_scale, bias, dtype)
+        return self.fp8_scaled_mm(input_quant, weight, input_scale, weight_scale, dtype, bias)
 
     def sgl_per_token_quant_fp8(self, x, out, scale):
         """Per-token FP8 quantization compatible with sgl_kernel.sgl_per_token_quant_fp8"""
-        q, s = self._pertoken_quant(x, quant_dtype=self._dtypes.fp8)
+        q, s = self._pertoken_quant(x, quant_dtype=torch.float8_e4m3fn)
         out.copy_(q)
         scale.copy_(s)
 
@@ -119,12 +272,34 @@ class AmdRocmDevice:
 
         # Inject aiter as sgl_kernel compatibility layer (REQUIRED)
         sgl_kernel = _get_aiter_sgl_kernel()
+        missing_attention = [
+            name
+            for name in ("flash_attn_func", "flash_attn_varlen_func")
+            if not hasattr(sgl_kernel._aiter, name)
+        ]
+        if missing_attention:
+            raise ImportError(
+                "Installed aiter is missing required attention APIs: "
+                + ", ".join(missing_attention)
+            )
         sys.modules["sgl_kernel"] = sgl_kernel
         # Update any module that already imported sgl_kernel
         for mod_name, mod in list(sys.modules.items()):
             if mod is not None and hasattr(mod, "sgl_kernel"):
                 setattr(mod, "sgl_kernel", sgl_kernel)
-        logger.info("  - aiter sgl_kernel compatibility layer enabled (RMSNorm, GEMM)")
+        logger.info(
+            "  - aiter capability summary: commit={}, gfx={}, dense_attention={}, "
+            "varlen_attention={}, gemm_a8w8={}, pertoken_quant={}, "
+            "gemm_gfx1201={}, rmsnorm={}",
+            AITER_COMMIT,
+            sgl_kernel._runtime_gfx or "unknown",
+            hasattr(sgl_kernel._aiter, "flash_attn_func"),
+            hasattr(sgl_kernel._aiter, "flash_attn_varlen_func"),
+            hasattr(sgl_kernel._aiter, "gemm_a8w8"),
+            hasattr(sgl_kernel._aiter, "pertoken_quant"),
+            sgl_kernel._gemm_a8w8_per_token_scale is not None,
+            sgl_kernel.rmsnorm_backend,
+        )
 
     @staticmethod
     def is_available() -> bool:

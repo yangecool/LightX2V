@@ -116,3 +116,9 @@ ignore = ["F"]
 [tool.ruff.lint.isort]
 known-first-party = ["lightx2v"]
 case-sensitive = true
+
+[tool.pytest.ini_options]
+markers = [
+    "requires_rocm: test requires a PyTorch ROCm runtime and GPU",
+    "requires_gfx1201: test requires an AMD gfx1201 GPU",
+]

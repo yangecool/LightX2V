@@ -95,14 +95,18 @@ class WanTransformerInfer(WanMxfp8FuseMixin, BaseTransformerInfer):
     def reset_infer_states(self, x, context):
         query_len = x.shape[0]
         context_len = context.shape[0]
+        # Aiter's varlen kernels dereference cu_seqlens from the device. Keep
+        # these small, reused metadata tensors beside the token tensors instead
+        # of constructing CPU tensors and copying them once per attention call.
+        metadata_device = x.device
         has_image_context = self.task in ["i2v", "flf2v", "animate", "s2v", "rs2v"] and self.config.get("use_image_encoder", True)
 
-        self.self_attn_cu_seqlens_qkv = torch.tensor([0, query_len], dtype=torch.int32)
-        self.cross_attn_cu_seqlens_q = torch.tensor([0, query_len], dtype=torch.int32)
+        self.self_attn_cu_seqlens_qkv = torch.tensor([0, query_len], dtype=torch.int32, device=metadata_device)
+        self.cross_attn_cu_seqlens_q = torch.tensor([0, query_len], dtype=torch.int32, device=metadata_device)
         if has_image_context:
-            self.cross_attn_cu_seqlens_kv_img = torch.tensor([0, 257], dtype=torch.int32)
+            self.cross_attn_cu_seqlens_kv_img = torch.tensor([0, 257], dtype=torch.int32, device=metadata_device)
             context_len -= 257
-        self.cross_attn_cu_seqlens_kv = torch.tensor([0, context_len], dtype=torch.int32)
+        self.cross_attn_cu_seqlens_kv = torch.tensor([0, context_len], dtype=torch.int32, device=metadata_device)
 
         if self.has_post_adapter:
             self.reset_post_adapter_states()
