@@ -12,10 +12,23 @@ ARG AITER_ROCM_ARCH=gfx1201
 FROM ${BASE_IMAGE} AS gfx1201_base
 
 ARG ARG_PYTORCH_ROCM_ARCH=gfx1201
-ENV ROCM_PATH=/opt/rocm \
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    PYTHONUTF8=1 \
+    ROCM_PATH=/opt/rocm \
     PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}
 
-RUN apt-get update \
+RUN if [ -f /etc/apt/sources.list ]; then \
+        sed -i -E \
+            's|https?://archive.ubuntu.com/ubuntu/?|https://mirrors.ctyun.cn/ubuntu/|g; s|https?://security.ubuntu.com/ubuntu/?|https://mirrors.ctyun.cn/ubuntu/|g' \
+            /etc/apt/sources.list; \
+    fi \
+    && if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then \
+        sed -i -E \
+            's|https?://archive.ubuntu.com/ubuntu/?|https://mirrors.ctyun.cn/ubuntu/|g; s|https?://security.ubuntu.com/ubuntu/?|https://mirrors.ctyun.cn/ubuntu/|g' \
+            /etc/apt/sources.list.d/ubuntu.sources; \
+    fi \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
@@ -29,6 +42,9 @@ RUN apt-get update \
         pkg-config \
         python3-dev \
     && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --no-cache-dir --upgrade pip \
+    && python3 -m pip config set \
+        global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
     && python3 -m pip install --no-cache-dir 'setuptools<80' wheel
 
 ########################################################################
