@@ -14,6 +14,30 @@
 
 当前没有为 GFX1201 提供 T2V、LoRA、INT8、ComfyUI 权重或多卡配置。源码中存在这些能力并不等于本分支的 GFX1201 配置已经覆盖它们。
 
+## 镜像构建源码
+
+镜像构建使用本地 LightX2V 和 AITER 源码，不在 Dockerfile 中 clone 这两个仓库。默认目录布局为：
+
+```text
+LightX2V-ROCm-GFX1201/
+|-- LightX2V/
+`-- aiter/
+```
+
+构建前在宿主机初始化 AITER submodule：
+
+```bash
+git -C ../aiter submodule update --init --recursive
+```
+
+然后从 LightX2V 仓库执行：
+
+```bash
+bash dockerfiles/platforms/build_gfx1201.sh
+```
+
+构建脚本会校验本地 AITER 工作树干净、HEAD 等于 Dockerfile 固定的 `AITER_COMMIT`，并确认所有 submodule 已初始化且处于固定 revision；随后通过独立的 BuildKit `aiter_source` context 将源码交给 Dockerfile。LightX2V 仍使用主 build context 的 `COPY`。`AITER_SOURCE_DIR` 只用于覆盖默认的 sibling 目录位置，不改变 commit 校验。
+
 ## 32 GB GFX1201 验证顺序
 
 1. 首先验证蒸馏 FP8 4 步。它使用 E4M3 scaled FP8 DiT、FP8 T5、Aiter FlyDSL/Triton BF16 Flash Attention 和 Aiter FP8 GEMM，是最匹配该卡硬件能力的管线。FP8 指 DiT GEMM 权重和计算；attention Q/K/V 仍为 BF16。
