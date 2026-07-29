@@ -1,6 +1,6 @@
 # AMD ROCm GFX1201 上的 Wan2.2 I2V
 
-本文只描述 `gfx1201-hvat-scratch` 分支中已经配置的单卡 Wan2.2 I2V 管线。目标卡为 32 GB 显存、原生支持 E4M3/E5M2 FP8 矩阵计算的 AMD RDNA4/GFX1201。所有配置均使用 AITER 注意力、Torch RMSNorm/RoPE，并关闭多卡并行。
+本文只描述 `gfx1201-hvat-scratch` 分支中已经配置的单卡 Wan2.2 I2V 管线。目标卡为 32 GB 显存、原生支持 E4M3/E5M2 FP8 矩阵计算的 AMD RDNA4/GFX1201。所有配置均使用 Aiter FlyDSL BF16 Flash Attention 作为 self-attention，使用 Aiter Triton BF16 Flash Attention 作为 text cross-attention，并使用 Torch RMSNorm/RoPE、关闭多卡并行。
 
 > 所有 GFX1201 配置尚未进行镜像或硬件验证。32 GB 和原生 FP8 能力使蒸馏 FP8 成为最合理的首测管线，但不代表已经确认能在 32 GB 内完成 720p/81 帧生成。
 
@@ -16,7 +16,7 @@
 
 ## 32 GB GFX1201 验证顺序
 
-1. 首先验证蒸馏 FP8 4 步。它使用 E4M3 scaled FP8 DiT、FP8 T5、AITER attention 和 AITER FP8 GEMM，是最匹配该卡硬件能力的管线。
+1. 首先验证蒸馏 FP8 4 步。它使用 E4M3 scaled FP8 DiT、FP8 T5、Aiter FlyDSL/Triton BF16 Flash Attention 和 Aiter FP8 GEMM，是最匹配该卡硬件能力的管线。FP8 指 DiT GEMM 权重和计算；attention Q/K/V 仍为 BF16。
 2. FP8 通过后再验证蒸馏 BF16 4 步。BF16 配置使用 phase offload，速度会明显低于 FP8 主路径，并需要更多主机内存。
 3. 最后验证标准 BF16 40 步。它主要用于确认非蒸馏原始模型兼容性，不适合作为性能或首次成功标准。
 
@@ -32,7 +32,7 @@
 
 不能直接在 GFX1201 上使用它：
 
-- `flash_attn3` 面向 NVIDIA Hopper，本分支改为 `aiter_attn`。
+- `flash_attn3` 面向 NVIDIA Hopper。本分支的 self-attention 改为 `aiter_flydsl_bf16_flash_attn`，text/image cross-attention 改为 `aiter_triton_bf16_flash_attn`。
 - 标准 `WanScheduler` 使用 `infer_steps` 和连续的 `boundary` 切换 high/low noise 模型。
 - 文件中的 `boundary_step_index` 和 `denoising_step_list` 只由蒸馏调度器消费，对标准 40 步管线无效，因此 R9600 配置没有保留它们。
 

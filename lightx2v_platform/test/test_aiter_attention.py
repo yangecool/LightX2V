@@ -150,7 +150,7 @@ def test_gfx1201_dense_self_attention_matches_reference():
     torch.manual_seed(17)
     q = torch.randn((256, 40, 128), device="cuda", dtype=torch.bfloat16) * 0.25
     cu = torch.tensor([0, q.shape[0]], device=q.device, dtype=torch.int32)
-    weight = adapter.AiterAttnWeight()
+    weight = adapter.AiterFlyDSLBF16FlashAttnWeight()
 
     actual = weight.apply(
         q,
@@ -177,7 +177,7 @@ def test_gfx1201_dense_cross_attention_matches_reference():
     q = torch.randn((129, 8, 128), device="cuda", dtype=torch.bfloat16) * 0.25
     k = torch.randn((77, 8, 128), device="cuda", dtype=torch.bfloat16) * 0.25
     v = torch.randn((77, 8, 128), device="cuda", dtype=torch.bfloat16) * 0.25
-    weight = adapter.AiterAttnWeight()
+    weight = adapter.AiterTritonBF16FlashAttnWeight()
 
     actual = weight.apply(
         q,
@@ -206,7 +206,7 @@ def test_gfx1201_packed_attention_matches_reference():
     # device/dtype normalization at the adapter boundary.
     cu_q = torch.tensor([0, 64, 96], dtype=torch.int64)
     cu_k = torch.tensor([0, 48, 80], dtype=torch.int64)
-    weight = adapter.AiterAttnWeight()
+    weight = adapter.AiterTritonBF16FlashAttnWeight()
 
     actual = weight.apply(
         q,

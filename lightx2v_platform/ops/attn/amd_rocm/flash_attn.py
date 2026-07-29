@@ -332,3 +332,105 @@ class AiterAttnWeight(AttnWeightTemplate):
             sink_ptr=sink_ptr,
         )
         return _restore_attention_output(output, q.shape[0])
+
+
+class _AiterBF16FlashAttnWeight(AiterAttnWeight):
+    route_name = "Aiter BF16 Flash Attention"
+
+    def _validate_bf16(self, q, k, v):
+        if not (q.dtype == k.dtype == v.dtype == torch.bfloat16):
+            raise RuntimeError(
+                f"{self.route_name} requires BF16 Q/K/V, got "
+                f"{q.dtype}, {k.dtype}, and {v.dtype}"
+            )
+
+
+@PLATFORM_ATTN_WEIGHT_REGISTER("aiter_flydsl_bf16_flash_attn")
+class AiterFlyDSLBF16FlashAttnWeight(_AiterBF16FlashAttnWeight):
+    """gfx1201 dense BF16 self-attention through Aiter FlyDSL."""
+
+    route_name = "Aiter FlyDSL BF16 Flash Attention"
+
+    def apply(
+        self,
+        q,
+        k,
+        v,
+        cu_seqlens_q=None,
+        cu_seqlens_kv=None,
+        max_seqlen_q=None,
+        max_seqlen_kv=None,
+        **kwargs,
+    ):
+        self._validate_bf16(q, k, v)
+        dense_single_sequence = _single_sequence_shape(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+        )
+        if not dense_single_sequence or not _dense_flydsl_eligible(q, k, v, kwargs):
+            raise RuntimeError(
+                f"{self.route_name} received a shape or option that would fall back "
+                "to Aiter Triton attention"
+            )
+        from aiter.ops.flydsl.utils import is_flydsl_available
+
+        if not is_flydsl_available():
+            raise RuntimeError(f"{self.route_name} requires the FlyDSL runtime")
+        return super().apply(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            **kwargs,
+        )
+
+
+@PLATFORM_ATTN_WEIGHT_REGISTER("aiter_triton_bf16_flash_attn")
+class AiterTritonBF16FlashAttnWeight(_AiterBF16FlashAttnWeight):
+    """gfx1201 BF16 cross/varlen attention through Aiter Triton."""
+
+    route_name = "Aiter Triton BF16 Flash Attention"
+
+    def apply(
+        self,
+        q,
+        k,
+        v,
+        cu_seqlens_q=None,
+        cu_seqlens_kv=None,
+        max_seqlen_q=None,
+        max_seqlen_kv=None,
+        **kwargs,
+    ):
+        self._validate_bf16(q, k, v)
+        dense_single_sequence = _single_sequence_shape(
+            q,
+            k,
+            v,
+            cu_seqlens_q,
+            cu_seqlens_kv,
+            max_seqlen_q,
+            max_seqlen_kv,
+        )
+        if dense_single_sequence and _dense_flydsl_eligible(q, k, v, kwargs):
+            raise RuntimeError(
+                f"{self.route_name} received an input that would route to Aiter FlyDSL"
+            )
+        return super().apply(
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            **kwargs,
+        )
