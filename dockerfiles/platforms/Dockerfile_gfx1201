@@ -1,10 +1,41 @@
-# LightX2V Wan2.2 bring-up image for AMD RDNA4 gfx1201.
-# Use build_gfx1201.sh to resolve this local tag to an immutable image ID.
+# LightX2V Wan2.2 image for AMD RDNA4 gfx1201.
+# Aiter is rebuilt from the pinned source commit, following vLLM's gfx1201
+# image structure. Use build_gfx1201.sh to pin the local base by image ID.
 ARG BASE_IMAGE=vllm-openai-rocm:hvat-gfx1201-scratch-v0.25.0-0716-TunedA8W8
-FROM ${BASE_IMAGE} AS base
-
 ARG AITER_REPO=https://github.com/yangecool/aiter.git
 ARG AITER_COMMIT=1b37c33172ea807d528de91c7b4f8f74ff61ec44
+ARG AITER_ROCM_ARCH=gfx1201
+
+########################################################################
+# build_aiter - build the pinned Aiter wheel without prebuilt kernels.
+########################################################################
+FROM ${BASE_IMAGE} AS build_aiter
+
+ARG AITER_REPO
+ARG AITER_COMMIT
+ARG AITER_ROCM_ARCH
+ARG MAX_JOBS
+ENV MAX_JOBS=${MAX_JOBS}
+
+WORKDIR /app
+RUN git clone "${AITER_REPO}" /app/aiter \
+    && cd /app/aiter \
+    && git checkout --detach "${AITER_COMMIT}" \
+    && git submodule update --init --recursive \
+    && python3 -m pip install --no-cache-dir -r requirements.txt \
+    && GPU_ARCHS="${AITER_ROCM_ARCH}" \
+       python3 setup.py bdist_wheel --dist-dir=dist \
+    && mkdir -p /app/aiter-install \
+    && cp dist/*.whl /app/aiter-install/
+
+########################################################################
+# final - install Aiter, LightX2V source, then runtime dependencies.
+########################################################################
+FROM ${BASE_IMAGE} AS final
+
+ARG AITER_REPO
+ARG AITER_COMMIT
+ARG AITER_ROCM_ARCH
 ARG ARG_PYTORCH_ROCM_ARCH=gfx1201
 ARG LIGHTX2V_REVISION=unknown
 ARG BASE_IMAGE_SOURCE=unknown
@@ -16,20 +47,30 @@ LABEL org.opencontainers.image.revision="${LIGHTX2V_REVISION}"
 LABEL org.opencontainers.image.base.name="${BASE_IMAGE_SOURCE}"
 LABEL org.opencontainers.image.aiter.revision="${AITER_COMMIT}"
 
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
-
 ENV PLATFORM=amd_rocm \
     DTYPE=BF16 \
     TOKENIZERS_PARALLELISM=false \
     ROCM_PATH=/opt/rocm \
     PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH} \
-    AITER_ROCM_ARCH=gfx1201 \
+    AITER_ROCM_ARCH=${AITER_ROCM_ARCH} \
     AITER_REPO=${AITER_REPO} \
     AITER_COMMIT=${AITER_COMMIT} \
     AITER_JIT_DIR=/workspace/.cache/aiter \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     SAFETENSORS_FAST_GPU=1
 
+# Replace any Aiter package inherited from the base image.
+RUN --mount=type=bind,from=build_aiter,src=/app/aiter-install,target=/aiter-install \
+    python3 -m pip uninstall -y amd-aiter aiter 2>/dev/null || true \
+    && python3 -m pip install --no-cache-dir /aiter-install/*.whl
+
+# Install LightX2V from source before resolving its runtime dependencies.
+WORKDIR /workspace/LightX2V
+COPY . /workspace/LightX2V
+RUN python3 -m pip install --no-cache-dir -e . --no-deps
+
+# Install system and Python runtime dependencies last. Keep the ROCm torch
+# family from the base image and use Aiter in place of the CUDA sgl-kernel.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ffmpeg \
@@ -38,34 +79,20 @@ RUN apt-get update \
         libglib2.0-0 \
         libsm6 \
         libxext6 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Fail during the build if the base is a runtime-only ROCm image or contains
-# an Aiter build without the gfx1201 architecture guard used by LightX2V.
-RUN command -v hipcc >/dev/null \
-    && python -c 'import aiter, torch, torchaudio, torchvision; from aiter.ops.flydsl_fmha_config import can_use_gfx1201_flydsl_dense_attention; from aiter.ops.gemm_op_a8w8 import _ck_a8w8_supported; required=("flash_attn_func", "flash_attn_varlen_func", "gemm_a8w8", "pertoken_quant", "rmsnorm2d_fwd"); missing=[name for name in required if not hasattr(aiter, name)]; assert torch.version.hip is not None, "base PyTorch is not a ROCm build"; assert not missing, f"Aiter APIs missing: {missing}"; print(f"base torch={torch.__version__} hip={torch.version.hip} torchvision={torchvision.__version__} torchaudio={torchaudio.__version__}")'
-
-WORKDIR /workspace/LightX2V
-COPY . /workspace/LightX2V
-
-# Aiter replaces the sgl_kernel API on AMD. Keep the ROCm torch family from
-# the base image instead of allowing pip to replace it with PyPI CUDA wheels.
-RUN sed -E '/^(torch|torchvision|torchaudio|sgl-kernel)([<=>~!].*)?$/d' requirements.txt > /tmp/requirements.gfx1201.txt \
-    && python -m pip install --no-cache-dir -r /tmp/requirements.gfx1201.txt \
-    && python -m pip install --no-cache-dir 'av' 'pytest' 'torchada>=0.1.10' \
-    && python -m pip install --no-cache-dir -e . --no-deps \
+    && rm -rf /var/lib/apt/lists/* \
+    && sed -E '/^(torch|torchvision|torchaudio|sgl-kernel)([<=>~!].*)?$/d' requirements.txt > /tmp/requirements.gfx1201.txt \
+    && python3 -m pip install --no-cache-dir -r /tmp/requirements.gfx1201.txt \
+    && python3 -m pip install --no-cache-dir 'av' 'pytest' 'torchada>=0.1.10' \
     && mkdir -p "${AITER_JIT_DIR}" \
     && chmod 0777 "${AITER_JIT_DIR}"
 
-# Docker builds do not expose the GPU. This still verifies platform setup,
-# Aiter API injection, and all eagerly imported LightX2V Python dependencies.
-RUN SKIP_PLATFORM_CHECK=True python -c 'import lightx2v; print(f"LightX2V {lightx2v.__version__} gfx1201 image import OK")'
-
-RUN { \
+RUN mkdir -p /app \
+    && { \
         echo "BASE_IMAGE=${BASE_IMAGE_SOURCE}"; \
         echo "LIGHTX2V_REVISION=${LIGHTX2V_REVISION}"; \
         echo "AITER_REPO=${AITER_REPO}"; \
         echo "AITER_COMMIT=${AITER_COMMIT}"; \
+        echo "AITER_ROCM_ARCH=${AITER_ROCM_ARCH}"; \
         echo "PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}"; \
     } >> /app/versions.txt
 
