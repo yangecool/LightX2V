@@ -11,6 +11,9 @@ pytorch_rocm_arch="${PYTORCH_ROCM_ARCH:-gfx1201}"
 aiter_rocm_arch="${AITER_ROCM_ARCH:-gfx1201}"
 aiter_repo="${AITER_REPO:-https://github.com/yangecool/aiter.git}"
 aiter_commit="${AITER_COMMIT:-1b37c33172ea807d528de91c7b4f8f74ff61ec44}"
+aiter_version="${AITER_VERSION:-0.1.16.post3+gfx1201.g1b37c3317}"
+accelerate_version="${ACCELERATE_VERSION:-1.14.0}"
+peft_version="${PEFT_VERSION:-0.20.0}"
 max_jobs="${MAX_JOBS:-$(nproc)}"
 lightx2v_revision="$(git -C "${lightx2v_dir}" rev-parse HEAD)"
 
@@ -82,8 +85,11 @@ echo "PYTORCH_ROCM_ARCH   = ${pytorch_rocm_arch}"
 echo "AITER_ROCM_ARCH     = ${aiter_rocm_arch}"
 echo "AITER_REPO          = ${aiter_repo}"
 echo "AITER_COMMIT        = ${aiter_commit}"
+echo "AITER_VERSION       = ${aiter_version}"
 echo "AITER_SOURCE_DIR    = ${aiter_source_dir}"
 echo "AITER_SOURCE_REV    = ${aiter_revision}"
+echo "ACCELERATE_VERSION  = ${accelerate_version}"
+echo "PEFT_VERSION        = ${peft_version}"
 echo "MAX_JOBS            = ${max_jobs}"
 echo "IMAGE_TAG           = ${image_tag}"
 echo "============================================================"
@@ -101,6 +107,9 @@ DOCKER_BUILDKIT=1 docker build \
     --build-arg "AITER_ROCM_ARCH=${aiter_rocm_arch}" \
     --build-arg "AITER_REPO=${aiter_repo}" \
     --build-arg "AITER_COMMIT=${aiter_commit}" \
+    --build-arg "AITER_VERSION=${aiter_version}" \
+    --build-arg "ACCELERATE_VERSION=${accelerate_version}" \
+    --build-arg "PEFT_VERSION=${peft_version}" \
     --build-arg "MAX_JOBS=${max_jobs}" \
     --build-arg "LIGHTX2V_REVISION=${lightx2v_revision}" \
     "${proxy_build_args[@]}" \

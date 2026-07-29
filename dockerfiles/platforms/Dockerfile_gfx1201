@@ -4,7 +4,10 @@
 ARG BASE_IMAGE=rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
 ARG AITER_REPO=https://github.com/yangecool/aiter.git
 ARG AITER_COMMIT=1b37c33172ea807d528de91c7b4f8f74ff61ec44
+ARG AITER_VERSION=0.1.16.post3+gfx1201.g1b37c3317
 ARG AITER_ROCM_ARCH=gfx1201
+ARG ACCELERATE_VERSION=1.14.0
+ARG PEFT_VERSION=0.20.0
 
 ########################################################################
 # gfx1201_base - keep the Aiter runtime JIT toolchain in the final image.
@@ -69,6 +72,7 @@ FROM aiter_triton AS build_aiter
 
 ARG AITER_REPO
 ARG AITER_COMMIT
+ARG AITER_VERSION
 ARG AITER_ROCM_ARCH
 ARG MAX_JOBS
 ENV MAX_JOBS=${MAX_JOBS}
@@ -79,7 +83,8 @@ RUN cd /app/aiter \
     && python3 -m pip install --no-cache-dir \
         --constraint /opt/rocm-stack.constraints.txt \
         -r requirements.txt \
-    && PREBUILD_KERNELS=0 GPU_ARCHS="${AITER_ROCM_ARCH}" \
+    && SETUPTOOLS_SCM_PRETEND_VERSION="${AITER_VERSION}" \
+       PREBUILD_KERNELS=0 GPU_ARCHS="${AITER_ROCM_ARCH}" \
        python3 setup.py bdist_wheel --dist-dir=dist \
     && mkdir -p /app/aiter-install \
     && cp dist/*.whl /app/aiter-install/
@@ -94,7 +99,10 @@ ARG BASE_IMAGE_DIGEST=unknown
 ARG BASE_IMAGE_ID=unknown
 ARG AITER_REPO
 ARG AITER_COMMIT
+ARG AITER_VERSION
 ARG AITER_ROCM_ARCH
+ARG ACCELERATE_VERSION
+ARG PEFT_VERSION
 ARG ARG_PYTORCH_ROCM_ARCH=gfx1201
 ARG LIGHTX2V_REVISION=unknown
 ARG BASE_IMAGE_SOURCE=unknown
@@ -106,6 +114,7 @@ LABEL org.opencontainers.image.revision="${LIGHTX2V_REVISION}"
 LABEL org.opencontainers.image.base.name="${BASE_IMAGE_SOURCE}"
 LABEL org.opencontainers.image.base.digest="${BASE_IMAGE_DIGEST}"
 LABEL org.opencontainers.image.aiter.revision="${AITER_COMMIT}"
+LABEL org.opencontainers.image.aiter.version="${AITER_VERSION}"
 
 ENV PLATFORM=amd_rocm \
     DTYPE=BF16 \
@@ -115,6 +124,7 @@ ENV PLATFORM=amd_rocm \
     AITER_ROCM_ARCH=${AITER_ROCM_ARCH} \
     AITER_REPO=${AITER_REPO} \
     AITER_COMMIT=${AITER_COMMIT} \
+    AITER_VERSION=${AITER_VERSION} \
     AITER_JIT_DIR=/workspace/.cache/aiter \
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
     SAFETENSORS_FAST_GPU=1
@@ -126,23 +136,9 @@ RUN --mount=type=bind,from=build_aiter,src=/app/aiter-install,target=/aiter-inst
         --constraint /opt/rocm-stack.constraints.txt \
         /aiter-install/*.whl
 
-# Install LightX2V from source before resolving its runtime dependencies.
+# Copy LightX2V source and install all ordinary runtime dependencies first.
 WORKDIR /workspace/LightX2V
 COPY . /workspace/LightX2V
-RUN python3 -m pip install --no-cache-dir --no-build-isolation -e . --no-deps
-
-# Resolve the Hugging Face runtime pair in upstream's install order. Keeping
-# these out of the full requirements solve avoids peft/accelerate backtracking.
-RUN python3 -m pip install --no-cache-dir \
-        --constraint /opt/rocm-stack.constraints.txt \
-        accelerate
-
-RUN python3 -m pip install --no-cache-dir \
-        --constraint /opt/rocm-stack.constraints.txt \
-        peft
-
-# Install Python runtime dependencies last. Constraints make an indirect
-# dependency conflict fail instead of replacing the ROCm torch/Triton stack.
 RUN sed -E '/^[[:space:]]*(torch|torchvision|torchaudio|sgl-kernel|accelerate|peft)([[:space:]]*[<=>~!].*)?([[:space:]]*#.*)?$/d' \
         requirements.txt > /tmp/requirements.gfx1201.txt \
     && python3 -m pip install --no-cache-dir \
@@ -155,6 +151,16 @@ RUN sed -E '/^[[:space:]]*(torch|torchvision|torchaudio|sgl-kernel|accelerate|pe
     && chmod 0777 "${AITER_JIT_DIR}" \
     && rm -f /tmp/requirements.gfx1201.txt
 
+# Their dependencies are already present above. Installing these two pinned
+# packages without dependency resolution prevents pip from trying to replace
+# the image's custom ROCm Torch build with a package from PyPI.
+RUN python3 -m pip install --no-cache-dir --no-deps \
+        "accelerate==${ACCELERATE_VERSION}" \
+        "peft==${PEFT_VERSION}"
+
+# Install LightX2V from the copied source using its standard editable layout.
+RUN python3 -m pip install --no-cache-dir --no-build-isolation -e . --no-deps
+
 RUN mkdir -p /app \
     && { \
         echo "BASE_IMAGE=${BASE_IMAGE_SOURCE}"; \
@@ -164,10 +170,12 @@ RUN mkdir -p /app \
         echo "LIGHTX2V_REVISION=${LIGHTX2V_REVISION}"; \
         echo "AITER_REPO=${AITER_REPO}"; \
         echo "AITER_COMMIT=${AITER_COMMIT}"; \
+        echo "AITER_VERSION=${AITER_VERSION}"; \
         echo "AITER_ROCM_ARCH=${AITER_ROCM_ARCH}"; \
         echo "PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}"; \
     } >> /app/versions.txt \
-    && python3 -c 'import triton; print("TRITON_VERSION=" + triton.__version__)' >> /app/versions.txt
+    && python3 -c 'from importlib.metadata import version; print("AITER_INSTALLED_VERSION=" + version("amd-aiter")); print("ACCELERATE_VERSION=" + version("accelerate")); print("PEFT_VERSION=" + version("peft")); import triton; print("TRITON_VERSION=" + triton.__version__)' \
+        >> /app/versions.txt
 
 ENTRYPOINT []
 CMD ["bash"]
