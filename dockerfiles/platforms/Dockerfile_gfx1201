@@ -131,9 +131,19 @@ WORKDIR /workspace/LightX2V
 COPY . /workspace/LightX2V
 RUN python3 -m pip install --no-cache-dir --no-build-isolation -e . --no-deps
 
+# Resolve the Hugging Face runtime pair in upstream's install order. Keeping
+# these out of the full requirements solve avoids peft/accelerate backtracking.
+RUN python3 -m pip install --no-cache-dir \
+        --constraint /opt/rocm-stack.constraints.txt \
+        accelerate
+
+RUN python3 -m pip install --no-cache-dir \
+        --constraint /opt/rocm-stack.constraints.txt \
+        peft
+
 # Install Python runtime dependencies last. Constraints make an indirect
 # dependency conflict fail instead of replacing the ROCm torch/Triton stack.
-RUN sed -E '/^[[:space:]]*(torch|torchvision|torchaudio|sgl-kernel)([[:space:]]*[<=>~!].*)?([[:space:]]*#.*)?$/d' \
+RUN sed -E '/^[[:space:]]*(torch|torchvision|torchaudio|sgl-kernel|accelerate|peft)([[:space:]]*[<=>~!].*)?([[:space:]]*#.*)?$/d' \
         requirements.txt > /tmp/requirements.gfx1201.txt \
     && python3 -m pip install --no-cache-dir \
         --constraint /opt/rocm-stack.constraints.txt \
