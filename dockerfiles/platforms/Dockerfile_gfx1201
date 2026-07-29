@@ -12,9 +12,7 @@ ARG AITER_ROCM_ARCH=gfx1201
 FROM ${BASE_IMAGE} AS gfx1201_base
 
 ARG ARG_PYTORCH_ROCM_ARCH=gfx1201
-ENV LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    PYTHONUTF8=1 \
+ENV VIRTUAL_ENV=/opt/venv \
     ROCM_PATH=/opt/rocm \
     PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}
 
@@ -42,8 +40,9 @@ RUN if [ -f /etc/apt/sources.list ]; then \
         pkg-config \
         python3-dev \
     && rm -rf /var/lib/apt/lists/* \
+    && python3 -c 'import sys; assert sys.prefix == "/opt/venv" and sys.prefix != sys.base_prefix, f"PEP 668: expected /opt/venv Python, got {sys.executable} (prefix={sys.prefix}, base_prefix={sys.base_prefix})"' \
     && python3 -m pip install --no-cache-dir --upgrade pip \
-    && python3 -m pip config set \
+    && python3 -m pip config --site set \
         global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
     && python3 -m pip install --no-cache-dir 'setuptools<80' wheel
 
