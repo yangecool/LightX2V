@@ -67,19 +67,11 @@ class AiterSglKernelCompat:
                 "Installed aiter is missing required public APIs: " + ", ".join(missing)
             )
 
+        # Do not bypass Aiter's architecture dispatch. The public rowwise A8W8
+        # entry selects CK where its instances are supported and selects the
+        # gfx11/gfx12 implementation before launching a kernel.
         self._gemm_a8w8 = aiter_module.gemm_a8w8
-        self._gemm_backend = "public"
-        if self._runtime_gfx.startswith("gfx1201"):
-            ck_gemm = getattr(aiter_module, "gemm_a8w8_CK", None)
-            if ck_gemm is None:
-                raise ImportError(
-                    "Installed aiter is missing gemm_a8w8_CK required by gfx1201"
-                )
-            # The CK wrapper consumes the same rowwise contract as fp8-sgl:
-            # activation scale [M, 1], weight scale [N, 1], weight [N, K].
-            # Its generated lookup also consumes a8w8_tuned_gemm.csv entries.
-            self._gemm_a8w8 = ck_gemm
-            self._gemm_backend = "ck-rowwise"
+        self._gemm_backend = "aiter-rowwise-dispatch"
         self._pertoken_quant = aiter_module.pertoken_quant
         self._dtypes = aiter_module.dtypes
         self._rmsnorm2d_fwd = getattr(aiter_module, "rmsnorm2d_fwd", None)
@@ -173,11 +165,6 @@ class AiterSglKernelCompat:
             raise ValueError(f"bias must be on {input_quant.device}, got {bias.device}")
 
         weight_nk = weight.transpose(-2, -1)
-        if self._gemm_backend == "ck-rowwise" and not weight_nk.is_contiguous():
-            raise ValueError(
-                "Aiter CK A8W8 requires the restored [N, K] weight view to be contiguous; "
-                "materialize the transpose once during checkpoint loading"
-            )
         return self._gemm_a8w8(input_quant, weight_nk, input_scale, weight_scale, bias, dtype)
 
     def int8_scaled_mm(self, input_quant, weight, input_scale, weight_scale, dtype, bias=None):
@@ -260,7 +247,7 @@ class AmdRocmDevice:
         logger.info(
             "  - aiter capability summary: commit={}, gfx={}, dense_attention={}, "
             "varlen_attention={}, gemm_a8w8={}, pertoken_quant={}, "
-            "gemm_gfx1201={}, rmsnorm={}",
+            "gemm_dispatch={}, rmsnorm={}",
             AITER_COMMIT,
             sgl_kernel._runtime_gfx or "unknown",
             hasattr(sgl_kernel._aiter, "flash_attn_func"),

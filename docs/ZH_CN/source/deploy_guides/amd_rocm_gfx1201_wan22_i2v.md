@@ -47,7 +47,7 @@ Dockerfile 直接调用该固定 AITER 源码中的 `.github/scripts/install_tri
 
 ## 32 GB GFX1201 验证顺序
 
-1. 首先验证蒸馏 FP8 4 步。它使用 E4M3 scaled FP8 DiT、FP8 T5、Aiter FlyDSL/Triton BF16 Flash Attention 和 Aiter FP8 GEMM，是最匹配该卡硬件能力的管线。FP8 指 DiT GEMM 权重和计算；attention Q/K/V 仍为 BF16。
+1. 首先验证蒸馏 FP8 4 步。它使用 E4M3 scaled FP8 DiT、FP8 T5、Aiter FlyDSL/Triton BF16 Flash Attention 和 Aiter FP8 GEMM，是最匹配该卡硬件能力的管线。LightX2V 保留 per-channel/rowwise scale 契约并调用 Aiter 公共 A8W8 dispatcher；支持的架构使用 CK，gfx1201 在 kernel launch 前选择对应的 rowwise 实现，不通过捕获 CK 错误进行回退。FP8 指 DiT GEMM 的 A/W 数据类型；累加结果输出为 BF16，attention Q/K/V 也仍为 BF16。
 2. FP8 通过后再验证蒸馏 BF16 4 步。BF16 配置使用 phase offload，速度会明显低于 FP8 主路径，并需要更多主机内存。
 3. 最后验证标准 BF16 40 步。它主要用于确认非蒸馏原始模型兼容性，不适合作为性能或首次成功标准。
 

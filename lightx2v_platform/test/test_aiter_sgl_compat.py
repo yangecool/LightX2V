@@ -57,7 +57,7 @@ def _fake_aiter():
     return module, calls
 
 
-def test_gfx1201_ck_fp8_layout_and_bias(monkeypatch):
+def test_gfx1201_rowwise_dispatch_preserves_fp8_layout_and_bias(monkeypatch):
     module, calls = _fake_aiter()
     monkeypatch.setattr(amd_rocm, "_runtime_gfx", lambda: "gfx1201")
     compat = amd_rocm.AiterSglKernelCompat(module)
@@ -78,7 +78,7 @@ def test_gfx1201_ck_fp8_layout_and_bias(monkeypatch):
     assert output.shape == (3, 7)
     kind, args = calls[-1]
     _, restored_weight, _, restored_scale, restored_bias, restored_dtype = args
-    assert kind == "ck"
+    assert kind == "public"
     assert tuple(restored_weight.shape) == (7, 5)
     assert restored_weight.is_contiguous()
     assert tuple(restored_scale.shape) == (7, 1)
@@ -97,17 +97,17 @@ def test_quant_uses_e4m3fn(monkeypatch):
     assert calls[-1] == ("quant", torch.float8_e4m3fn)
 
 
-def test_gfx1201_ck_vector_scales_are_zero_copy(monkeypatch):
+def test_gfx1201_rowwise_dispatch_vector_scales_are_zero_copy(monkeypatch):
     module, _ = _fake_aiter()
     monkeypatch.setattr(amd_rocm, "_runtime_gfx", lambda: "gfx1201")
     compat = amd_rocm.AiterSglKernelCompat(module)
     observed = {}
 
-    def ck_gemm(x, w, x_scale, w_scale, bias, dtype):
+    def public_gemm(x, w, x_scale, w_scale, bias, dtype):
         observed.update(x_scale=x_scale, w_scale=w_scale)
         return torch.zeros((x.shape[0], w.shape[0]), dtype=dtype)
 
-    compat._gemm_a8w8 = ck_gemm
+    compat._gemm_a8w8 = public_gemm
     input_scale = torch.ones(3, dtype=torch.float32)
     weight_scale = torch.ones(7, dtype=torch.float32)
     checkpoint_weight = torch.zeros((7, 5), dtype=torch.int8)
@@ -168,7 +168,7 @@ def test_gfx1201_fp8_gemm_matches_dequantized_reference():
     import aiter
 
     compat = amd_rocm.AiterSglKernelCompat(aiter)
-    assert compat._gemm_backend == "ck-rowwise"
+    assert compat._gemm_backend == "aiter-rowwise-dispatch"
     device = torch.device("cuda")
     torch.manual_seed(7)
     m, n, k = 37, 53, 128
@@ -204,6 +204,37 @@ def test_gfx1201_fp8_gemm_matches_dequantized_reference():
     )
     assert float(cosine) >= 0.999
     torch.testing.assert_close(actual.float(), reference, atol=3e-2, rtol=3e-2)
+
+
+@pytest.mark.requires_rocm
+@pytest.mark.requires_gfx1201
+@requires_gfx1201
+def test_gfx1201_t5_fp8_rowwise_gemm_shape():
+    import aiter
+
+    compat = amd_rocm.AiterSglKernelCompat(aiter)
+    device = torch.device("cuda")
+    m, n, k = 512, 4096, 4096
+    x = torch.randn((m, k), device=device, dtype=torch.bfloat16) * 0.125
+    weight = torch.randn((n, k), device=device, dtype=torch.bfloat16) * 0.125
+    x_quant, x_scale = aiter.pertoken_quant(
+        x, quant_dtype=torch.float8_e4m3fn
+    )
+    weight_quant, weight_scale = aiter.pertoken_quant(
+        weight, quant_dtype=torch.float8_e4m3fn
+    )
+
+    actual = compat.fp8_scaled_mm(
+        x_quant,
+        weight_quant.t(),
+        x_scale,
+        weight_scale,
+        torch.bfloat16,
+    )
+
+    assert actual.shape == (m, n)
+    assert actual.dtype == torch.bfloat16
+    assert torch.isfinite(actual).all()
 
 
 @pytest.mark.requires_rocm
