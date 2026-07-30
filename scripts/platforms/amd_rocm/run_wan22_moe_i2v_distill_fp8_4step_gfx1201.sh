@@ -8,6 +8,19 @@ model_path="${MODEL_PATH:-${models_root}/Wan-AI/Wan2.2-I2V-A14B}"
 export PLATFORM=amd_rocm
 export DTYPE=BF16
 export TOKENIZERS_PARALLELISM=false
+export GPU_ARCHS="${GPU_ARCHS:-gfx1201}"
+export CU_NUM="${CU_NUM:-24}"
+export AITER_LOG_TUNED_CONFIG="${AITER_LOG_TUNED_CONFIG:-1}"
+if [[ "${GPU_ARCHS}" != "gfx1201" || "${CU_NUM}" != "24" ]]; then
+    echo "gfx1201 FP8 requires GPU_ARCHS=gfx1201 and CU_NUM=24 to match the tuned AITER lookup" >&2
+    exit 1
+fi
+# AITER imports an existing module_gemm_a8w8.so without checking whether its
+# generated lookup came from an older CSV. Namespace this JIT revision once so
+# persistent cache mounts cannot silently reuse the pre-tuning module.
+aiter_jit_root="${AITER_JIT_DIR:-/workspace/.cache/aiter}"
+export AITER_JIT_DIR="${aiter_jit_root%/}/gfx1201-cu24-rowwise-v1"
+mkdir -p "${AITER_JIT_DIR}"
 # On ROCm, setting HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES to the same
 # non-zero physical id can filter the already-filtered device list twice.
 export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"

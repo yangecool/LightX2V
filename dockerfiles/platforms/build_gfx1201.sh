@@ -12,9 +12,15 @@ pypi_mirror="${PYPI_MIRROR:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 uv_version="${UV_VERSION:-0.11.32}"
 pytorch_rocm_arch="${PYTORCH_ROCM_ARCH:-gfx1201}"
 aiter_rocm_arch="${AITER_ROCM_ARCH:-gfx1201}"
+aiter_cu_num="${AITER_CU_NUM:-24}"
 aiter_repo="${AITER_REPO:-https://github.com/yangecool/aiter.git}"
 max_jobs="${MAX_JOBS:-$(nproc)}"
 lightx2v_revision="$(git -C "${lightx2v_dir}" rev-parse HEAD)"
+
+if [[ "${aiter_cu_num}" != "24" ]]; then
+    echo "This gfx1201 image uses the LightX2V/AITER 24-CU dispatch contract; got AITER_CU_NUM=${aiter_cu_num}" >&2
+    exit 1
+fi
 
 proxy_build_args=()
 if [[ -n "${HTTP_PROXY:-}" ]]; then
@@ -103,6 +109,7 @@ echo "UV_VERSION          = ${uv_version}"
 echo "LIGHTX2V_REVISION   = ${lightx2v_revision}"
 echo "PYTORCH_ROCM_ARCH   = ${pytorch_rocm_arch}"
 echo "AITER_ROCM_ARCH     = ${aiter_rocm_arch}"
+echo "AITER_CU_NUM        = ${aiter_cu_num}"
 echo "AITER_REPO          = ${aiter_repo}"
 echo "AITER_COMMIT        = ${aiter_commit}"
 echo "AITER_VERSION       = ${aiter_version}"
@@ -125,6 +132,7 @@ DOCKER_BUILDKIT=1 docker build \
     --build-arg "UV_VERSION=${uv_version}" \
     --build-arg "ARG_PYTORCH_ROCM_ARCH=${pytorch_rocm_arch}" \
     --build-arg "AITER_ROCM_ARCH=${aiter_rocm_arch}" \
+    --build-arg "AITER_CU_NUM=${aiter_cu_num}" \
     --build-arg "AITER_REPO=${aiter_repo}" \
     --build-arg "AITER_COMMIT=${aiter_commit}" \
     --build-arg "AITER_VERSION=${aiter_version}" \

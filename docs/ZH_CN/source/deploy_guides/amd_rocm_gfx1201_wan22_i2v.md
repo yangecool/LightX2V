@@ -47,7 +47,7 @@ Dockerfile 直接调用该固定 AITER 源码中的 `.github/scripts/install_tri
 
 ## 32 GB GFX1201 验证顺序
 
-1. 首先验证蒸馏 FP8 4 步。它使用 E4M3 scaled FP8 DiT、FP8 T5、Aiter FlyDSL/Triton BF16 Flash Attention 和 Aiter FP8 GEMM，是最匹配该卡硬件能力的管线。LightX2V 保留 per-channel/rowwise scale 契约并调用 Aiter 公共 A8W8 dispatcher；支持的架构使用 CK，gfx1201 在 kernel launch 前选择对应的 rowwise 实现，不通过捕获 CK 错误进行回退。FP8 指 DiT GEMM 的 A/W 数据类型；累加结果输出为 BF16，attention Q/K/V 也仍为 BF16。
+1. 首先验证蒸馏 FP8 4 步。它使用 E4M3 scaled FP8 DiT、FP8 T5、Aiter FlyDSL/Triton BF16 Flash Attention 和 Aiter FP8 GEMM，是最匹配该卡硬件能力的管线。LightX2V 保留 per-channel/rowwise scale 契约并调用 Aiter 公共 A8W8 dispatcher；gfx1201 的已调优形状精确命中 CK lookup，未调优形状先使用 16x16 WMMA CK heuristic，只有 CK 的 `IsSupportedArgument` 明确拒绝该形状时才转到 rowwise Triton。FP8 指 GEMM 的 A/W 数据类型；`dtype=torch.bfloat16` 是累加后的输出类型，attention Q/K/V 也仍为 BF16。
 2. FP8 通过后再验证蒸馏 BF16 4 步。BF16 配置使用 phase offload，速度会明显低于 FP8 主路径，并需要更多主机内存。
 3. 最后验证标准 BF16 40 步。它主要用于确认非蒸馏原始模型兼容性，不适合作为性能或首次成功标准。
 
@@ -114,6 +114,8 @@ docker run --rm -it \
   --device=/dev/kfd \
   --device=/dev/dri \
   --ipc=host \
+  -e GPU_ARCHS=gfx1201 \
+  -e CU_NUM=24 \
   -v /path/to/models:/models:ro \
   -v /path/to/outputs:/workspace/LightX2V/save_results \
   lightx2v-rocm:gfx1201-hvat-scratch
@@ -124,6 +126,8 @@ docker run --rm -it \
 ```bash
 bash /workspace/LightX2V/scripts/platforms/amd_rocm/run_wan22_moe_i2v_distill_fp8_4step_gfx1201.sh
 ```
+
+FP8 启动脚本会在挂载的 `AITER_JIT_DIR` 下使用 `gfx1201-cu24-rowwise-v1` 子目录。旧目录中的 `module_gemm_a8w8.so` 不包含新的 gfx1201 lookup，不能直接复用；新命名空间只会在首次启动时重新 JIT。
 
 该 GFX1201 脚本提供容器内默认值：LightX2V 位于 `/workspace/LightX2V`，模型根目录为 `/models`，Wan2.2 基础模型位于 `/models/Wan-AI/Wan2.2-I2V-A14B`，默认使用逻辑 GPU 0。路径仍可通过 `LIGHTX2V_PATH`、`MODELS_ROOT`、`MODEL_PATH`、`HIP_VISIBLE_DEVICES` 或 `CUDA_VISIBLE_DEVICES` 覆盖，不影响 Dockerfile 的通用性。
 
@@ -136,6 +140,8 @@ export LIGHTX2V_PATH=/workspace/LightX2V
 export MODELS_ROOT=/models
 export MODEL_PATH=/models/Wan-AI/Wan2.2-I2V-A14B
 export HIP_VISIBLE_DEVICES=0
+export GPU_ARCHS=gfx1201
+export CU_NUM=24
 ```
 
 标准 BF16 40 步 R9600 低显存配置：

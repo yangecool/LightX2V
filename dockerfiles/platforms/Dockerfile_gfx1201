@@ -9,6 +9,7 @@ ARG AITER_REPO=https://github.com/yangecool/aiter.git
 ARG AITER_COMMIT=unknown
 ARG AITER_VERSION=0.1.16.post3+gfx1201
 ARG AITER_ROCM_ARCH=gfx1201
+ARG AITER_CU_NUM=24
 
 ########################################################################
 # gfx1201_base - retain the exact framework stack from the vLLM base.
@@ -89,6 +90,7 @@ FROM gfx1201_base AS build_aiter
 ARG AITER_COMMIT
 ARG AITER_VERSION
 ARG AITER_ROCM_ARCH
+ARG AITER_CU_NUM
 ARG MAX_JOBS
 ENV MAX_JOBS=${MAX_JOBS}
 
@@ -101,7 +103,7 @@ RUN cd /app/aiter \
         --constraint /opt/rocm-stack.constraints.txt \
         -r requirements.txt \
     && SETUPTOOLS_SCM_PRETEND_VERSION="${AITER_VERSION}" \
-       PREBUILD_KERNELS=0 GPU_ARCHS="${AITER_ROCM_ARCH}" \
+       PREBUILD_KERNELS=0 GPU_ARCHS="${AITER_ROCM_ARCH}" CU_NUM="${AITER_CU_NUM}" \
        python3 setup.py bdist_wheel --dist-dir=dist \
     && test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1 \
     && mkdir -p /app/aiter-install \
@@ -121,6 +123,7 @@ ARG AITER_REPO
 ARG AITER_COMMIT
 ARG AITER_VERSION
 ARG AITER_ROCM_ARCH
+ARG AITER_CU_NUM
 ARG ARG_PYTORCH_ROCM_ARCH=gfx1201
 
 LABEL org.opencontainers.image.title="LightX2V gfx1201"
@@ -138,6 +141,9 @@ ENV PLATFORM=amd_rocm \
     ROCM_PATH=/opt/rocm \
     PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH} \
     AITER_ROCM_ARCH=${AITER_ROCM_ARCH} \
+    GPU_ARCHS=${AITER_ROCM_ARCH} \
+    CU_NUM=${AITER_CU_NUM} \
+    AITER_LOG_TUNED_CONFIG=1 \
     AITER_REPO=${AITER_REPO} \
     AITER_COMMIT=${AITER_COMMIT} \
     AITER_VERSION=${AITER_VERSION} \
@@ -189,6 +195,7 @@ RUN mkdir -p /app \
         echo "AITER_COMMIT=${AITER_COMMIT}"; \
         echo "AITER_VERSION=${AITER_VERSION}"; \
         echo "AITER_ROCM_ARCH=${AITER_ROCM_ARCH}"; \
+        echo "AITER_CU_NUM=${AITER_CU_NUM}"; \
         echo "PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}"; \
         cat /opt/rocm-stack.constraints.txt; \
     } >> /app/versions.txt \
