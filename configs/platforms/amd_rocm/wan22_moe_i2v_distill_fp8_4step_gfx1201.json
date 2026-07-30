@@ -36,5 +36,10 @@
     "rope_type": "torch_real_rope",
     "modulate_type": "torch",
     "feature_caching": "NoCaching",
-    "parallel": false
+    "parallel": {
+        "seq_p_size": 2,
+        "seq_p_attn_type": "ulysses",
+        "seq_p_prepost_backend": "torch",
+        "seq_p_a2a_backend": "torch"
+    }
 }

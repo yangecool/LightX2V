@@ -23,15 +23,20 @@ export AITER_JIT_DIR="${aiter_jit_root%/}/gfx1201-cu24-rowwise-v1"
 mkdir -p "${AITER_JIT_DIR}"
 # On ROCm, setting HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES to the same
 # non-zero physical id can filter the already-filtered device list twice.
-export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"
+export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0,1}}"
 unset CUDA_VISIBLE_DEVICES
+IFS=',' read -r -a gpu_devices <<<"${HIP_VISIBLE_DEVICES}"
+if [[ ! "${HIP_VISIBLE_DEVICES}" =~ ^[0-9]+,[0-9]+$ || "${gpu_devices[0]}" == "${gpu_devices[1]}" ]]; then
+    echo "gfx1201 FP8 SP=2 requires two different HIP devices, for example HIP_VISIBLE_DEVICES=0,1" >&2
+    exit 1
+fi
 
 export PYTHONPATH="${PYTHONPATH:-}"
 source "${lightx2v_path}/scripts/base/base.sh"
 
 cd "${models_root}"
 
-python -m lightx2v.infer \
+torchrun --standalone --nproc_per_node=2 -m lightx2v.infer \
     --model_cls wan2.2_moe_distill \
     --task i2v \
     --model_path "${model_path}" \
