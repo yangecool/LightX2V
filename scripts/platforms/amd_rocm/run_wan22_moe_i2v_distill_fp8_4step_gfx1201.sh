@@ -8,10 +8,12 @@ model_path="${MODEL_PATH:-${models_root}/Wan-AI/Wan2.2-I2V-A14B}"
 export PLATFORM=amd_rocm
 export DTYPE=BF16
 export TOKENIZERS_PARALLELISM=false
-gpu_devices="${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"
-export HIP_VISIBLE_DEVICES="${gpu_devices}"
-export CUDA_VISIBLE_DEVICES="${gpu_devices}"
+# On ROCm, setting HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES to the same
+# non-zero physical id can filter the already-filtered device list twice.
+export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"
+unset CUDA_VISIBLE_DEVICES
 
+export PYTHONPATH="${PYTHONPATH:-}"
 source "${lightx2v_path}/scripts/base/base.sh"
 
 cd "${models_root}"

@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+IMAGE="${IMAGE:-lightx2v-rocm:gfx1201-hvat-scratch}"
+CONTAINER_NAME="${CONTAINER_NAME:-lightx2v-gfx1201}"
+GPU_DEVICES="${GPU_DEVICES:-0}"
+
+# Host model layout from /disk/ssd/difumodels-Dis. The container maps these
+# directories into the lowercase layout expected by the GFX1201 configs.
+MODEL_STORE="${MODEL_STORE:-/disk/ssd/difumodels-Dis}"
+ENCODERS_DIR="${ENCODERS_DIR:-${MODEL_STORE}/Encoders}"
+DISTILL_MODELS_DIR="${DISTILL_MODELS_DIR:-${MODEL_STORE}/Wan2.2-Distill-Models}"
+WAN22_BASE_DIR="${WAN22_BASE_DIR:-${MODEL_STORE}/Wan2.2-I2V-A14B}"
+
+RUNTIME_ROOT="${RUNTIME_ROOT:-/disk/ssd/lightx2v-runtime}"
+INPUT_DIR="${INPUT_DIR:-${RUNTIME_ROOT}/inputs}"
+OUTPUT_DIR="${OUTPUT_DIR:-${RUNTIME_ROOT}/outputs}"
+CACHE_DIR="${CACHE_DIR:-${RUNTIME_ROOT}/cache}"
+
+readonly CONTAINER_MODELS_ROOT=/models
+readonly CONTAINER_BASE_MODEL=/models/Wan-AI/Wan2.2-I2V-A14B
+readonly FP8_RUN_SCRIPT=/workspace/LightX2V/scripts/platforms/amd_rocm/run_wan22_moe_i2v_distill_fp8_4step_gfx1201.sh
+readonly BF16_RUN_SCRIPT=/workspace/LightX2V/scripts/platforms/amd_rocm/run_wan22_moe_i2v_distill_bf16_4step_gfx1201.sh
+readonly T5_FP8_FILENAME=models_t5_umt5-xxl-enc-fp8.pth
+readonly T5_BF16_FILENAME=models_t5_umt5-xxl-enc-bf16.pth
+
+usage() {
+    cat <<'EOF'
+Usage:
+  ./lightx2vModelrun                 Open an interactive shell
+  ./lightx2vModelrun --infer-fp8     Run the GFX1201 FP8 4-step I2V example
+  ./lightx2vModelrun --infer-bf16    Run the GFX1201 BF16 4-step I2V example
+  ./lightx2vModelrun --infer         Alias for --infer-fp8
+  ./lightx2vModelrun COMMAND [ARG...] Run a command in the container
+
+Important environment overrides:
+  WAN22_BASE_DIR       Wan2.2-I2V-A14B support-model directory
+  MODEL_STORE          Parent of Encoders and Wan2.2-Distill-Models
+  OUTPUT_DIR           Generated video directory
+  INPUT_DIR            Custom input directory, available as /inputs
+  CACHE_DIR            Persistent Aiter, Triton, Torch, and HF cache directory
+  GPU_DEVICES          One physical HIP GPU id (default: 0)
+  IMAGE                Docker image (default: lightx2v-rocm:gfx1201-hvat-scratch)
+  CONTAINER_NAME       Docker container name
+  AUTO_REMOVE=0        Keep the stopped container
+  SKIP_MODEL_CHECKS=1  Skip required model-file checks
+  DRY_RUN=1            Print the docker command without starting it
+EOF
+}
+
+die() {
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+require_dir() {
+    [[ -d "$1" ]] || die "Required directory not found: $1"
+}
+
+require_file() {
+    [[ -f "$1" ]] || die "Required file not found: $1"
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    usage
+    exit 0
+fi
+
+inference_mode=shell
+case "${1:-}" in
+    --infer | --infer-fp8) inference_mode=fp8 ;;
+    --infer-bf16) inference_mode=bf16 ;;
+esac
+
+if [[ ! "${GPU_DEVICES}" =~ ^[0-9]+$ ]]; then
+    die "GPU_DEVICES must be one physical GPU id; this GFX1201 configuration is single-GPU"
+fi
+
+encoder_mount_source="${ENCODERS_DIR}"
+encoder_mount_target="${CONTAINER_MODELS_ROOT}/encoders/t5"
+t5_fp8_path="${ENCODERS_DIR}/${T5_FP8_FILENAME}"
+if [[ -f "${ENCODERS_DIR}/t5/${T5_FP8_FILENAME}" ]]; then
+    encoder_mount_target="${CONTAINER_MODELS_ROOT}/encoders"
+    t5_fp8_path="${ENCODERS_DIR}/t5/${T5_FP8_FILENAME}"
+fi
+
+if [[ "${DRY_RUN:-0}" != "1" ]]; then
+    command -v docker >/dev/null 2>&1 || die "docker is not installed or is not in PATH"
+    [[ -c /dev/kfd ]] || die "ROCm device /dev/kfd is unavailable"
+    [[ -d /dev/dri ]] || die "DRM device directory /dev/dri is unavailable"
+
+    require_dir "${ENCODERS_DIR}"
+    require_dir "${DISTILL_MODELS_DIR}"
+    require_dir "${WAN22_BASE_DIR}"
+
+    if [[ "${SKIP_MODEL_CHECKS:-0}" != "1" ]]; then
+        require_dir "${WAN22_BASE_DIR}/google/umt5-xxl"
+        require_file "${WAN22_BASE_DIR}/google/umt5-xxl/special_tokens_map.json"
+        require_file "${WAN22_BASE_DIR}/google/umt5-xxl/spiece.model"
+        require_file "${WAN22_BASE_DIR}/google/umt5-xxl/tokenizer_config.json"
+        require_file "${WAN22_BASE_DIR}/google/umt5-xxl/tokenizer.json"
+        require_file "${WAN22_BASE_DIR}/high_noise_model/config.json"
+        require_file "${WAN22_BASE_DIR}/low_noise_model/config.json"
+        require_file "${WAN22_BASE_DIR}/Wan2.1_VAE.pth"
+        if [[ "${inference_mode}" == "fp8" ]]; then
+            require_file "${t5_fp8_path}"
+            require_file "${DISTILL_MODELS_DIR}/wan2.2_i2v_A14b_high_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors"
+            require_file "${DISTILL_MODELS_DIR}/wan2.2_i2v_A14b_low_noise_scaled_fp8_e4m3_lightx2v_4step.safetensors"
+        elif [[ "${inference_mode}" == "bf16" ]]; then
+            require_file "${WAN22_BASE_DIR}/${T5_BF16_FILENAME}"
+            require_file "${DISTILL_MODELS_DIR}/wan2.2_i2v_A14b_high_noise_lightx2v_4step.safetensors"
+            require_file "${DISTILL_MODELS_DIR}/wan2.2_i2v_A14b_low_noise_lightx2v_4step.safetensors"
+        fi
+    fi
+
+    mkdir -p \
+        "${INPUT_DIR}" \
+        "${OUTPUT_DIR}" \
+        "${CACHE_DIR}/aiter" \
+        "${CACHE_DIR}/huggingface" \
+        "${CACHE_DIR}/torch_extensions" \
+        "${CACHE_DIR}/triton"
+
+    docker image inspect "${IMAGE}" >/dev/null 2>&1 || die "Docker image is unavailable: ${IMAGE}"
+fi
+
+docker_args=(
+    run
+    --name "${CONTAINER_NAME}"
+    --hostname "${CONTAINER_NAME}"
+    --init
+    --network=host
+    --ipc=host
+    --cap-add=SYS_PTRACE
+    --security-opt=seccomp=unconfined
+    --device=/dev/kfd
+    --device=/dev/dri
+    --ulimit=memlock=-1:-1
+    --ulimit=stack=67108864:67108864
+    --workdir=/workspace/LightX2V
+    --env "HIP_VISIBLE_DEVICES=${GPU_DEVICES}"
+    --env PLATFORM=amd_rocm
+    --env DTYPE=BF16
+    --env TOKENIZERS_PARALLELISM=false
+    --env "MODELS_ROOT=${CONTAINER_MODELS_ROOT}"
+    --env "MODEL_PATH=${CONTAINER_BASE_MODEL}"
+    --env LIGHTX2V_PATH=/workspace/LightX2V
+    --env AITER_JIT_DIR=/workspace/.cache/aiter
+    --env TRITON_CACHE_DIR=/workspace/.cache/triton
+    --env TORCH_EXTENSIONS_DIR=/workspace/.cache/torch_extensions
+    --env HF_HOME=/root/.cache/huggingface
+    --env PYTORCH_ROCM_ARCH=gfx1201
+    --env AITER_ROCM_ARCH=gfx1201
+    --env HSA_ENABLE_IPC_MODE_LEGACY=1
+    --env HIP_FORCE_DEV_KERNARG=1
+    --env SAFETENSORS_FAST_GPU=1
+    --mount "type=bind,source=${MODEL_STORE},target=/data,readonly"
+    --mount "type=bind,source=${WAN22_BASE_DIR},target=${CONTAINER_BASE_MODEL},readonly"
+    --mount "type=bind,source=${encoder_mount_source},target=${encoder_mount_target},readonly"
+    --mount "type=bind,source=${DISTILL_MODELS_DIR},target=${CONTAINER_MODELS_ROOT}/lightx2v/Wan2.2-Distill-Models,readonly"
+    --mount "type=bind,source=${INPUT_DIR},target=/inputs"
+    --mount "type=bind,source=${OUTPUT_DIR},target=/workspace/LightX2V/save_results"
+    --mount "type=bind,source=${CACHE_DIR}/aiter,target=/workspace/.cache/aiter"
+    --mount "type=bind,source=${CACHE_DIR}/huggingface,target=/root/.cache/huggingface"
+    --mount "type=bind,source=${CACHE_DIR}/torch_extensions,target=/workspace/.cache/torch_extensions"
+    --mount "type=bind,source=${CACHE_DIR}/triton,target=/workspace/.cache/triton"
+)
+
+if [[ "${AUTO_REMOVE:-1}" == "1" ]]; then
+    docker_args+=(--rm)
+fi
+
+if [[ -t 0 && -t 1 ]]; then
+    docker_args+=(-it)
+else
+    docker_args+=(-i)
+fi
+
+for host_group in video render; do
+    if group_entry="$(getent group "${host_group}" 2>/dev/null)"; then
+        docker_args+=(--group-add "$(cut -d: -f3 <<<"${group_entry}")")
+    fi
+done
+
+for passthrough_env in HF_TOKEN HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy; do
+    if [[ -n "${!passthrough_env:-}" ]]; then
+        docker_args+=(--env "${passthrough_env}")
+    fi
+done
+
+if [[ -e /etc/localtime ]]; then
+    docker_args+=(--mount type=bind,source=/etc/localtime,target=/etc/localtime,readonly)
+fi
+
+container_command=(/bin/bash)
+if [[ "${inference_mode}" == "fp8" ]]; then
+    container_command=(/bin/bash "${FP8_RUN_SCRIPT}")
+elif [[ "${inference_mode}" == "bf16" ]]; then
+    container_command=(/bin/bash "${BF16_RUN_SCRIPT}")
+elif (( $# > 0 )); then
+    container_command=("$@")
+fi
+
+printf 'Image:          %s\n' "${IMAGE}"
+printf 'Container:      %s\n' "${CONTAINER_NAME}"
+printf 'GPU devices:    %s\n' "${GPU_DEVICES}"
+printf 'Mode:           %s\n' "${inference_mode}"
+printf 'Base model:     %s\n' "${WAN22_BASE_DIR}"
+printf 'Encoders:       %s -> %s\n' "${encoder_mount_source}" "${encoder_mount_target}"
+printf 'Distill models: %s\n' "${DISTILL_MODELS_DIR}"
+printf 'Inputs:         %s\n' "${INPUT_DIR}"
+printf 'Outputs:        %s\n' "${OUTPUT_DIR}"
+printf 'Cache:          %s\n' "${CACHE_DIR}"
+
+docker_command=(docker "${docker_args[@]}" "${IMAGE}" "${container_command[@]}")
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+    printf 'DRY RUN:'
+    printf ' %q' "${docker_command[@]}"
+    printf '\n'
+    exit 0
+fi
+
+exec "${docker_command[@]}"

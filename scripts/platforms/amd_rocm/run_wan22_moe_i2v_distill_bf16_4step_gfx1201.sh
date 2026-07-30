@@ -11,10 +11,11 @@ model_path="${MODEL_PATH:-}"
 export PLATFORM=amd_rocm
 export DTYPE=BF16
 export TOKENIZERS_PARALLELISM=false
-gpu_devices="${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"
-export HIP_VISIBLE_DEVICES="${gpu_devices}"
-export CUDA_VISIBLE_DEVICES="${gpu_devices}"
+# Avoid filtering a non-zero physical ROCm device twice.
+export HIP_VISIBLE_DEVICES="${HIP_VISIBLE_DEVICES:-${CUDA_VISIBLE_DEVICES:-0}}"
+unset CUDA_VISIBLE_DEVICES
 
+export PYTHONPATH="${PYTHONPATH:-}"
 source "${lightx2v_path}/scripts/base/base.sh"
 
 cd "${models_root}"
