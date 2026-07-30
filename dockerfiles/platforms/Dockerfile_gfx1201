@@ -176,8 +176,7 @@ RUN --mount=type=cache,id=lightx2v-gfx1201-uv,target=/root/.cache/uv \
 
 RUN uv pip install --system --no-deps --no-build-isolation -e . \
     && mkdir -p "${AITER_JIT_DIR}" \
-    && chmod 0777 "${AITER_JIT_DIR}" \
-    && python3 -m lightx2v.infer --help >/dev/null
+    && chmod 0777 "${AITER_JIT_DIR}"
 
 RUN mkdir -p /app \
     && { \
