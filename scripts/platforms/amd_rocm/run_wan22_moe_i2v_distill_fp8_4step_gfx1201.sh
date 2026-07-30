@@ -36,7 +36,12 @@ source "${lightx2v_path}/scripts/base/base.sh"
 
 cd "${models_root}"
 
-torchrun --standalone --nproc_per_node=2 -m lightx2v.infer \
+torchrun \
+    --nnodes=1 \
+    --nproc_per_node=2 \
+    --master_addr="${MASTER_ADDR:-127.0.0.1}" \
+    --master_port="${MASTER_PORT:-29500}" \
+    -m lightx2v.infer \
     --model_cls wan2.2_moe_distill \
     --task i2v \
     --model_path "${model_path}" \
