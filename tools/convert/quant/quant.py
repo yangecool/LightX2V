@@ -1,7 +1,6 @@
 from abc import ABCMeta
 
 import torch
-from qtorch.quant import float_quantize
 
 from lightx2v.utils.registry_factory import CONVERT_WEIGHT_REGISTER
 
@@ -67,7 +66,7 @@ class QuantWeightFP8(QuantTemplate):
         scales = max_val / qmax
         scaled_tensor = w / scales
         scaled_tensor = torch.clip(scaled_tensor, qmin, qmax)
-        w_q = float_quantize(scaled_tensor.float(), 4, 3, rounding="nearest").to(torch.float8_e4m3fn)
+        w_q = scaled_tensor.to(torch.float8_e4m3fn)
 
         assert torch.isnan(scales).sum() == 0
         assert torch.isnan(w_q).sum() == 0
