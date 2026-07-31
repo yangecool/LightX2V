@@ -142,6 +142,40 @@ def test_invalid_cu_seqlens_fail_before_kernel(monkeypatch, cu_q, message):
         )
 
 
+def test_triton_apply_with_lse_normalizes_ring_contract(monkeypatch):
+    calls = []
+
+    def dense(q, k, v, **kwargs):
+        calls.append(kwargs)
+        batch, tokens, heads, _ = q.shape
+        lse = torch.arange(
+            batch * heads * tokens,
+            dtype=torch.float32,
+        ).reshape(batch, heads, tokens)
+        return q, lse
+
+    monkeypatch.setattr(adapter, "IS_AMD_ROCM", True)
+    monkeypatch.setattr(adapter, "AITER_AVAILABLE", True)
+    monkeypatch.setattr(adapter, "aiter_flash_attn_func", dense)
+    monkeypatch.setattr(adapter, "_dense_flydsl_eligible", lambda *args, **kwargs: False)
+    weight = adapter.AiterTritonBF16FlashAttnWeight()
+
+    q = torch.zeros((5, 2, 8), dtype=torch.bfloat16)
+    output, lse = weight.apply_with_lse(q, q, q, softmax_scale=0.25)
+
+    assert calls[-1]["return_lse"] is True
+    assert calls[-1]["softmax_scale"] == 0.25
+    assert output.shape == (5, 16)
+    assert lse.shape == (5, 2)
+    expected_lse = (
+        torch.arange(10, dtype=torch.float32)
+        .reshape(1, 2, 5)
+        .transpose(1, 2)
+        .reshape(5, 2)
+    )
+    torch.testing.assert_close(lse, expected_lse)
+
+
 @pytest.mark.requires_rocm
 @pytest.mark.requires_gfx1201
 @requires_gfx1201
@@ -191,6 +225,30 @@ def test_gfx1201_dense_cross_attention_matches_reference():
     counts = adapter.get_aiter_attention_route_counts(reset=True)
     assert counts["aiter_dense_triton_fallback"] == 1
     _assert_attention_close(actual, reference)
+
+
+@pytest.mark.requires_rocm
+@pytest.mark.requires_gfx1201
+@requires_gfx1201
+def test_gfx1201_dense_attention_with_lse_matches_reference():
+    torch.manual_seed(29)
+    q = torch.randn((65, 4, 128), device="cuda", dtype=torch.bfloat16) * 0.25
+    k = torch.randn((47, 4, 128), device="cuda", dtype=torch.bfloat16) * 0.25
+    v = torch.randn((47, 4, 128), device="cuda", dtype=torch.bfloat16) * 0.25
+    softmax_scale = q.shape[-1] ** -0.5
+    weight = adapter.AiterTritonBF16FlashAttnWeight()
+
+    actual, actual_lse = weight.apply_with_lse(
+        q,
+        k,
+        v,
+        softmax_scale=softmax_scale,
+    )
+    scores = torch.einsum("qhd,khd->hqk", q.float(), k.float()) * softmax_scale
+    reference_lse = torch.logsumexp(scores, dim=-1).transpose(0, 1)
+
+    _assert_attention_close(actual.reshape_as(q), _attention_reference(q, k, v))
+    torch.testing.assert_close(actual_lse, reference_lse, atol=3e-2, rtol=3e-2)
 
 
 @pytest.mark.requires_rocm

@@ -434,3 +434,33 @@ class AiterTritonBF16FlashAttnWeight(_AiterBF16FlashAttnWeight):
             max_seqlen_kv=max_seqlen_kv,
             **kwargs,
         )
+
+    def apply_with_lse(self, q, k, v, softmax_scale=None):
+        """Apply one dense Triton attention block for Ring SP."""
+        result = self.apply(
+            q,
+            k,
+            v,
+            softmax_scale=softmax_scale,
+            return_lse=True,
+        )
+        if not isinstance(result, tuple) or len(result) < 2:
+            raise RuntimeError(
+                f"{self.route_name} expected Aiter to return (output, lse) "
+                "when return_lse=True"
+            )
+
+        output, lse = result[:2]
+        batch_size = q.shape[0] if q.ndim == 4 else 1
+        token_count = q.shape[1] if q.ndim == 4 else q.shape[0]
+        head_count = q.shape[-2]
+        if lse.shape == (batch_size, head_count, token_count):
+            lse = lse.transpose(1, 2).reshape(batch_size * token_count, head_count)
+        elif batch_size == 1 and lse.shape == (head_count, token_count):
+            lse = lse.transpose(0, 1).contiguous()
+        elif lse.shape != (batch_size * token_count, head_count):
+            raise RuntimeError(
+                f"{self.route_name} returned unsupported LSE shape {tuple(lse.shape)}; "
+                f"expected ({batch_size}, {head_count}, {token_count})"
+            )
+        return output, lse
