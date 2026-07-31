@@ -19,15 +19,40 @@ from lightx2v_platform.registry_factory import PLATFORM_DEVICE_REGISTER
 # Detect AMD ROCm platform
 IS_AMD_ROCM = hasattr(torch.version, "hip") and torch.version.hip is not None
 
-# aiter installation info
+# aiter installation info.
+#
+# AITER_REPO / AITER_BRANCH / AITER_COMMIT define the *standalone* pip-install
+# fallback used when the user has not built the gfx1201 Docker image
+# (which copies the local aiter source tree in at a known commit, and is the
+# path that ships the tuned gfx1201 lookup + CK rowwise dispatch).
+#
+# The Docker image path is authoritative for gfx1201 Wan2.2 bring-up:
+#   dockerfiles/platforms/build_gfx1201.sh
+#   dockerfiles/platforms/Dockerfile_gfx1201
+# It copies aiter from a sibling source dir, then build_gfx1201.sh verifies
+# `aiter_revision == AITER_COMMIT` and that the worktree is clean.
+#
+# The values below are only consulted when aiter is `pip install`-ed outside
+# the image (e.g. `pip install -e .` from a fresh clone, or the
+# AITER_INSTALL_CMD snippet printed on ImportError). They are kept in sync
+# with the gfx1201-compatible tip of the aiter fork:
+#   repo:    https://github.com/yangecool/aiter.git
+#   branch:  main
+#   commit:  c4c6a15f1 perf(gemm_a8w8): add LightX2V DiT gfx1201 tuning
+# Older commits (e.g. 1b37c3317) predate the gfx1201 rowwise CK dispatch and
+# the LightX2V DiT tuning rows in a8w8_tuned_gemm.csv.
 AITER_REPO = os.getenv("AITER_REPO", "https://github.com/yangecool/aiter.git")
+AITER_BRANCH = os.getenv("AITER_BRANCH", "main")
 AITER_COMMIT = os.getenv(
-    "AITER_COMMIT", "1b37c33172ea807d528de91c7b4f8f74ff61ec44"
+    "AITER_COMMIT", "c4c6a15f114365f37b592d4a21c9a887b9631326"
 )
 AITER_INSTALL_CMD = f"""
-# One-line install command for aiter (AMD ROCm optimized kernels):
+# One-line install command for aiter (AMD ROCm optimized kernels).
+# Bumps AITER_COMMIT to track the gfx1201-compatible tip; override via env
+# if you need to pin a different revision.
 git clone {AITER_REPO} /tmp/aiter && \\
 cd /tmp/aiter && \\
+git checkout {AITER_BRANCH} && \\
 git checkout {AITER_COMMIT} && \\
 pip install -e .
 """
