@@ -1,6 +1,6 @@
 # AMD ROCm GFX1201 上的 Wan2.2 I2V
 
-本文只描述 `gfx1201-hvat-scratch` 分支中已经配置的单卡 Wan2.2 I2V 管线。目标卡为 32 GB 显存、原生支持 E4M3/E5M2 FP8 矩阵计算的 AMD RDNA4/GFX1201。所有配置均使用 Aiter FlyDSL BF16 Flash Attention 作为 self-attention，使用 Aiter Triton BF16 Flash Attention 作为 text cross-attention，使用 Aiter RMSNorm 和 Torch RoPE，并关闭多卡并行。
+本文描述 `gfx1201-hvat-scratch` 分支中的 Wan2.2 I2V 管线。目标卡为 32 GB 显存、原生支持 E4M3/E5M2 FP8 矩阵计算的 AMD RDNA4/GFX1201。蒸馏 FP8 支持 1/2/4/8/16 卡：1/2/4/8 卡使用 Ulysses，16 卡使用 Ring，均关闭 CFG。
 
 > 所有 GFX1201 配置尚未进行镜像或硬件验证。32 GB 和原生 FP8 能力使蒸馏 FP8 成为最合理的首测管线，但不代表已经确认能在 32 GB 内完成 720p/81 帧生成。
 
@@ -12,16 +12,17 @@
 | 蒸馏 BF16 I2V | `wan2.2_moe_distill` | 4 | `Wan2.2-Distill-Models` 的 high/low BF16 合并权重 | 已配置，待硬件验证 |
 | 蒸馏 FP8 I2V | `wan2.2_moe_distill` | 4 | `Wan2.2-Distill-Models` 的 high/low scaled FP8 权重 | 已配置，待硬件验证 |
 
-当前没有为 GFX1201 提供 T2V、LoRA、INT8、ComfyUI 权重或多卡配置。源码中存在这些能力并不等于本分支的 GFX1201 配置已经覆盖它们。
+当前没有为 GFX1201 提供 T2V、INT8 或 ComfyUI 管线。Wan2.2 high/low distill LoRA 可通过 `LightX2VRun` 一键合并、量化为 scaled FP8，并复用同一套多卡推理入口。
 
 ## 镜像构建源码
 
-镜像构建使用本地 LightX2V 和 AITER 源码，不在 Dockerfile 中 clone 这两个仓库。默认目录布局为：
+镜像构建使用本地 LightX2V、AITER 和 LightX2VRun，不在 Dockerfile 中 clone 仓库。默认三个仓库互为 sibling：
 
 ```text
-LightX2V-ROCm-GFX1201/
+Code/
 |-- LightX2V/
-`-- aiter/
+|-- aiter/
+`-- LightX2VRun/
 ```
 
 构建前在宿主机初始化 AITER submodule：
@@ -41,7 +42,7 @@ HTTPS_PROXY=http://127.0.0.1:10808/ \
 bash dockerfiles/platforms/build_gfx1201.sh
 ```
 
-构建脚本会校验本地 LightX2V/AITER 工作树干净、AITER HEAD 等于 Dockerfile 固定的 `AITER_COMMIT`，并确认所有 submodule 已初始化且处于固定 revision；基础镜像会从本地 tag 解析为 BuildKit 可用于 `FROM` 的 `repository@sha256:digest`，本地 image ID 只写入版本记录。随后脚本通过独立的 BuildKit `aiter_source` context 将源码交给 Dockerfile。LightX2V 仍使用主 build context 的 `COPY`。`AITER_SOURCE_DIR` 只用于覆盖默认的 sibling 目录位置，不改变 commit 校验。`HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 仅在调用者显式设置时作为 Docker 预定义 build args 转发；Dockerfile 不声明或持久化代理配置。
+构建脚本会校验三个工作树均已提交且干净，并确认 AITER 和 LightX2VRun 的 HEAD 分别匹配可选的 `AITER_COMMIT`、`LIGHTX2V_RUN_COMMIT`。随后通过独立的 BuildKit named context 复制 AITER 源码和 LightX2VRun 运行脚本；最终镜像记录三个 revision。目录不为 sibling 时使用 `AITER_SOURCE_DIR` 和 `LIGHTX2V_RUN_SOURCE_DIR` 覆盖。`HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 仅在调用者显式设置时转发，不会持久化到镜像。
 
 Dockerfile 直接调用该固定 AITER 源码中的 `.github/scripts/install_triton.sh`，AITER wheel 构建层和最终运行层继承同一个 Triton 层。最终镜像同时保留 `hipcc` 所需的 C/C++、Python headers、CMake 和 Ninja 环境，用于 AITER 首次运行时 JIT；不会继承基础镜像中未经 AITER 选择的 Triton，也不会把完整 AITER 源码留在最终层。
 
@@ -107,7 +108,7 @@ Dockerfile 直接调用该固定 AITER 源码中的 `.github/scripts/install_tri
 
 ### 容器脚本启动
 
-与 NVIDIA 镜像保持相同的职责边界：Dockerfile 只提供运行环境和 LightX2V 源码，不固定模型卷、不设置全局模型路径，也不替换容器入口。模型和结果目录由 `docker run` 挂载：
+镜像在 `/opt/LightX2VRun` 中保留构建时已提交的运行脚本快照，但不固定模型卷、不设置全局模型路径，也不替换容器入口。`/workspace/LightX2V/scripts/platforms/amd_rocm/` 只保留两个双卡兼容入口：Distill FP8 和 LoRA FP8。它们优先使用宿主 bind mount 到 `/workspace/LightX2VRun` 的对应脚本；没有检测到挂载时会打印 `WARNING`，再使用 `/opt/LightX2VRun` 快照。模型和结果目录由 `docker run` 挂载：
 
 ```bash
 docker run --rm -it \
@@ -127,9 +128,9 @@ docker run --rm -it \
 bash /workspace/LightX2V/scripts/platforms/amd_rocm/run_wan22_moe_i2v_distill_fp8_4step_gfx1201.sh
 ```
 
-FP8 启动脚本会在挂载的 `AITER_JIT_DIR` 下使用 `gfx1201-cu24-rowwise-v1` 子目录。旧目录中的 `module_gemm_a8w8.so` 不包含新的 gfx1201 lookup，不能直接复用；新命名空间只会在首次启动时重新 JIT。
+FP8 启动脚本会在挂载的 `AITER_JIT_DIR` 下使用 `gfx1201-cu24-rowwise-v2` 子目录。旧目录中的 `module_gemm_a8w8.so` 不包含新的 gfx1201 lookup，不能直接复用；新命名空间只会在首次启动时重新 JIT。
 
-该 GFX1201 脚本提供容器内默认值：LightX2V 位于 `/workspace/LightX2V`，模型根目录为 `/models`，Wan2.2 基础模型位于 `/models/Wan-AI/Wan2.2-I2V-A14B`，默认使用逻辑 GPU 0。路径仍可通过 `LIGHTX2V_PATH`、`MODELS_ROOT`、`MODEL_PATH`、`HIP_VISIBLE_DEVICES` 或 `CUDA_VISIBLE_DEVICES` 覆盖，不影响 Dockerfile 的通用性。
+这两个镜像内兼容入口固定调用双卡脚本，默认使用逻辑 GPU `0,1`。1/4/8/16 卡从挂载的 `/workspace/LightX2VRun/scripts` 启动。LightX2V 默认为 `/workspace/LightX2V`，模型根目录为 `/models`，Wan2.2 基础模型默认为 `/models/Wan-AI/Wan2.2-I2V-A14B`。每步进度和最终 DiT `s/it` 默认开启。
 
 ### 源码脚本启动
 
@@ -161,5 +162,14 @@ bash /workspace/LightX2V/scripts/platforms/amd_rocm/run_wan22_moe_i2v_distill_bf
 ```bash
 bash /workspace/LightX2V/scripts/platforms/amd_rocm/run_wan22_moe_i2v_distill_fp8_4step_gfx1201.sh
 ```
+
+LoRA 合并、scaled FP8 量化并执行蒸馏 FP8 4 步：
+
+```bash
+bash /workspace/LightX2V/scripts/platforms/amd_rocm/run_wan22_moe_i2v_distill_lora_fp8_4step_gfx1201.sh
+```
+
+这两个镜像内入口固定为双卡。挂载 `LightX2VRun` 后，1/4/8/16 卡仍从
+`/workspace/LightX2VRun/scripts` 中对应的带卡数脚本启动。
 
 两个蒸馏脚本会切换到 `MODELS_ROOT` 后启动，以便配置中的 `lightx2v/...` 和 `encoders/...` 相对路径稳定解析。标准 40 步管线只读取 `MODEL_PATH` 下的原始 high/low noise 模型，不会读取 `Wan2.2-Distill-Models`。

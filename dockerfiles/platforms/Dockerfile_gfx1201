@@ -1,6 +1,7 @@
 # LightX2V Wan2.2 image for AMD RDNA4 gfx1201.
 # The vLLM base owns ROCm, PyTorch, torchvision, torchaudio, Triton, and
-# FlashAttention. Aiter and LightX2V are rebuilt from local source contexts.
+# FlashAttention. Aiter, LightX2V, and the launcher snapshot come from local
+# source contexts.
 ARG BASE_IMAGE=vllm/vllm-openai-rocm:v0.25.0-base
 ARG APT_MIRROR=https://mirrors.ctyun.cn/ubuntu
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
@@ -119,6 +120,7 @@ ARG BASE_IMAGE_DIGEST=unknown
 ARG BASE_IMAGE_ID=unknown
 ARG BASE_IMAGE_SOURCE=unknown
 ARG LIGHTX2V_REVISION=unknown
+ARG LIGHTX2V_RUN_REVISION=unknown
 ARG AITER_REPO
 ARG AITER_COMMIT
 ARG AITER_VERSION
@@ -130,6 +132,7 @@ LABEL org.opencontainers.image.title="LightX2V gfx1201"
 LABEL org.opencontainers.image.description="LightX2V Wan2.2 on the vLLM ROCm base with local Aiter"
 LABEL org.opencontainers.image.source="https://github.com/yangecool/LightX2V"
 LABEL org.opencontainers.image.revision="${LIGHTX2V_REVISION}"
+LABEL org.opencontainers.image.lightx2vrun.revision="${LIGHTX2V_RUN_REVISION}"
 LABEL org.opencontainers.image.base.name="${BASE_IMAGE_SOURCE}"
 LABEL org.opencontainers.image.base.digest="${BASE_IMAGE_DIGEST}"
 LABEL org.opencontainers.image.aiter.revision="${AITER_COMMIT}"
@@ -183,6 +186,10 @@ RUN uv pip install --system --no-deps --no-build-isolation -e . \
     && mkdir -p "${AITER_JIT_DIR}" \
     && chmod 0777 "${AITER_JIT_DIR}"
 
+COPY --from=lightx2v_run_source README.md /opt/LightX2VRun/README.md
+COPY --from=lightx2v_run_source scripts /opt/LightX2VRun/scripts
+RUN printf '%s\n' "${LIGHTX2V_RUN_REVISION}" > /opt/LightX2VRun/REVISION
+
 RUN mkdir -p /app \
     && { \
         echo "LIGHTX2V_IMAGE_BASE=${BASE_IMAGE_SOURCE}"; \
@@ -190,6 +197,7 @@ RUN mkdir -p /app \
         echo "LIGHTX2V_IMAGE_BASE_DIGEST=${BASE_IMAGE_DIGEST}"; \
         echo "LIGHTX2V_IMAGE_BASE_ID=${BASE_IMAGE_ID}"; \
         echo "LIGHTX2V_REVISION=${LIGHTX2V_REVISION}"; \
+        echo "LIGHTX2V_RUN_REVISION=${LIGHTX2V_RUN_REVISION}"; \
         echo "AITER_REPO=${AITER_REPO}"; \
         echo "AITER_COMMIT=${AITER_COMMIT}"; \
         echo "AITER_VERSION=${AITER_VERSION}"; \
