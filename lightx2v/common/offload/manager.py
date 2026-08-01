@@ -1,3 +1,4 @@
+import math
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
@@ -9,6 +10,23 @@ from lightx2v.utils.profiler import ExcludedProfilingContext
 from lightx2v_platform.base.global_var import AI_DEVICE
 
 torch_device_module = getattr(torch, AI_DEVICE)
+
+
+def resolve_offload_block_count(blocks_num, offload_ratio=1.0):
+    """Return how many leading blocks should use streaming CPU offload."""
+    try:
+        ratio = float(offload_ratio)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"offload_ratio must be a number in [0, 1], got {offload_ratio!r}") from exc
+
+    if not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0:
+        raise ValueError(f"offload_ratio must be a finite number in [0, 1], got {offload_ratio!r}")
+    if blocks_num < 0:
+        raise ValueError(f"blocks_num must be non-negative, got {blocks_num}")
+
+    # This preserves the historical `block_idx < ratio * blocks_num`
+    # behavior when the product is not an integer.
+    return min(blocks_num, math.ceil(ratio * blocks_num))
 
 
 class WeightAsyncStreamManager(object):

@@ -1,7 +1,9 @@
 import torch
 import torch.distributed as dist
+from loguru import logger
 
 from lightx2v.common.modules.weight_module import WeightModule, WeightModuleList
+from lightx2v.common.offload.manager import resolve_offload_block_count
 from lightx2v.common.ops.norm.rms_norm_weight import RMSWeightTP
 from lightx2v.models.networks.wan.infer.utils import WanCausalRope  # noqa: F401
 from lightx2v.utils.registry_factory import (
@@ -127,6 +129,14 @@ class WanTransformerWeights(WeightModule):
             self.mm_type = "Calib"
             assert not config["cpu_offload"]
         self.lazy_load = self.config.get("lazy_load", False)
+        self.streamed_blocks_num = resolve_offload_block_count(self.blocks_num, self.config.get("offload_ratio", 1.0))
+        if (
+            self.lazy_load
+            and self.config.get("cpu_offload", False)
+            and self.config.get("offload_granularity", "block") == "block"
+            and self.streamed_blocks_num != self.blocks_num
+        ):
+            raise NotImplementedError("Partial block offload is not supported with lazy_load")
         self.blocks = WeightModuleList(
             [
                 WanTransformerAttentionBlock(
@@ -161,6 +171,10 @@ class WanTransformerWeights(WeightModule):
     def register_offload_buffers(self, config, lazy_load_path, lora_path):
         if config["cpu_offload"]:
             if config["offload_granularity"] == "block":
+                if self.streamed_blocks_num == 0:
+                    self.offload_block_cuda_buffers = None
+                    self.offload_phase_cuda_buffers = None
+                    return
                 self.offload_blocks_num = 2
                 self.offload_block_cuda_buffers = WeightModuleList(
                     [
@@ -236,6 +250,23 @@ class WanTransformerWeights(WeightModule):
                     )
                     self.add_module("offload_phase_cpu_buffers", self.offload_phase_cpu_buffers)
                     self.offload_block_cpu_buffers = None
+
+    def load(self, weight_dict):
+        super().load(weight_dict)
+        if not self.config.get("cpu_offload", False) or self.config.get("offload_granularity", "block") != "block":
+            return
+
+        streamed_blocks = resolve_offload_block_count(self.blocks_num, self.config.get("offload_ratio", 1.0))
+        if streamed_blocks == self.blocks_num:
+            return
+
+        for block in self.blocks[streamed_blocks:]:
+            block.to_cuda()
+        logger.info(
+            "Wan partial block offload: {} streamed from CPU, {} resident on GPU",
+            streamed_blocks,
+            self.blocks_num - streamed_blocks,
+        )
 
     def non_block_weights_to_cuda(self):
         self.norm.to_cuda()

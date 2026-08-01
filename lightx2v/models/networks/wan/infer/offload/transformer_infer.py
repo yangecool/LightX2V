@@ -1,6 +1,6 @@
 import torch
 
-from lightx2v.common.offload.manager import WeightAsyncStreamManager
+from lightx2v.common.offload.manager import WeightAsyncStreamManager, resolve_offload_block_count
 from lightx2v.models.networks.wan.infer.transformer_infer import WanTransformerInfer
 from lightx2v_platform.base.global_var import AI_DEVICE
 
@@ -12,9 +12,16 @@ class WanOffloadTransformerInfer(WanTransformerInfer):
         super().__init__(config)
         if self.config.get("cpu_offload", False):
             offload_granularity = self.config.get("offload_granularity", "block")
+            self.lazy_load = self.config.get("lazy_load", False)
+            self.offload_ratio = float(self.config.get("offload_ratio", 1.0))
+            self.offload_blocks_num = resolve_offload_block_count(self.blocks_num, self.offload_ratio)
             if offload_granularity == "block":
-                self.infer_func = self.infer_with_blocks_offload
+                if self.lazy_load and self.offload_blocks_num != self.blocks_num:
+                    raise NotImplementedError("Partial block offload is not supported with lazy_load")
+                self.infer_func = self.infer_with_blocks_offload if self.offload_blocks_num else self.infer_without_offload
             elif offload_granularity == "phase":
+                if self.offload_blocks_num != self.blocks_num:
+                    raise NotImplementedError("offload_ratio currently applies only to block offload")
                 self.infer_func = self.infer_with_phases_offload
                 self.compiled_phases = {}
                 self.phase_params = {
@@ -31,17 +38,16 @@ class WanOffloadTransformerInfer(WanTransformerInfer):
             elif offload_granularity == "model":
                 self.infer_func = self.infer_without_offload
 
-            if offload_granularity != "model":
+            if offload_granularity != "model" and self.offload_blocks_num:
                 self.offload_manager = WeightAsyncStreamManager(offload_granularity=offload_granularity)
-            self.lazy_load = self.config.get("lazy_load", False)
             if self.lazy_load:
                 self.offload_manager.init_lazy_load(num_workers=self.config.get("num_disk_workers", 4))
 
     def infer_with_blocks_offload(self, blocks, x, pre_infer_out):
-        for block_idx in range(len(blocks)):
+        for block_idx in range(self.offload_blocks_num):
             self.block_idx = block_idx
             if self.lazy_load:
-                next_prefetch = (block_idx + 1) % len(blocks)
+                next_prefetch = (block_idx + 1) % self.offload_blocks_num
                 self.offload_manager.start_prefetch_block(next_prefetch)
 
             if self.offload_manager.need_init_first_buffer:
@@ -50,7 +56,7 @@ class WanOffloadTransformerInfer(WanTransformerInfer):
             if self.lazy_load:
                 self.offload_manager.swap_cpu_buffers()
 
-            self.offload_manager.prefetch_weights((block_idx + 1) % len(blocks), blocks)
+            self.offload_manager.prefetch_weights((block_idx + 1) % self.offload_blocks_num, blocks)
             if AI_DEVICE == "xpu":
                 # XPU streams do not guarantee cross-stream memory visibility even
                 # after a device-wide sync, so run compute on the default stream.
@@ -60,6 +66,10 @@ class WanOffloadTransformerInfer(WanTransformerInfer):
                     x = self.run_block(block_idx, self.offload_manager.cuda_buffers[0], x, pre_infer_out)
 
             self.offload_manager.swap_blocks()
+
+        for block_idx in range(self.offload_blocks_num, len(blocks)):
+            self.block_idx = block_idx
+            x = self.run_block(block_idx, blocks[block_idx], x, pre_infer_out)
 
         if self.clean_cuda_cache:
             del (
