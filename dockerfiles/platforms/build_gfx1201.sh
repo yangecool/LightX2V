@@ -14,7 +14,7 @@ uv_version="${UV_VERSION:-0.11.32}"
 pytorch_rocm_arch="${PYTORCH_ROCM_ARCH:-gfx1201}"
 aiter_rocm_arch="${AITER_ROCM_ARCH:-gfx1201}"
 aiter_cu_num="${AITER_CU_NUM:-24}"
-aiter_repo="${AITER_REPO:-https://github.com/yangecool/aiter.git}"
+aiter_repo="${AITER_REPO:-https://gitcode.com/hvat-ai/aiter.git}"
 max_jobs="${MAX_JOBS:-$(nproc)}"
 lightx2v_revision="$(git -C "${lightx2v_dir}" rev-parse HEAD)"
 
