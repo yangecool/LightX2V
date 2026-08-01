@@ -108,7 +108,11 @@ class DefaultRunner(BaseRunner):
         if self.config.get("feature_caching", "NoCaching") != "NoCaching":
             raise NotImplementedError("Warmup does not support feature caching")
 
-        self.run_warmup()
+        # Warmup is a one-time preparation cost, not part of measured inference.
+        # Keep its own profiler entry while excluding it from outer scopes such
+        # as the CLI's "Total Cost" timer.
+        with ExcludedProfilingContext("Warmup from measured inference"):
+            self.run_warmup()
 
     def run_warmup(self):
         raise NotImplementedError(f"Warmup is not supported for {type(self).__name__}")
