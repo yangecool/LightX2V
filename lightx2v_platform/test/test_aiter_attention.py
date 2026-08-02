@@ -109,16 +109,34 @@ def test_sage_preserves_tuning_config_while_forcing_v2(monkeypatch):
     assert kernel_config == {"BLOCK_M": 64, "BLOCK_N": 32}
 
 
-def test_sage_apply_with_lse_rejects_ring_sp(monkeypatch):
-    _mock_sage_available(
-        monkeypatch,
-        lambda *args, **kwargs: pytest.fail("Sage kernel must not run"),
-    )
+def test_sage_apply_with_lse_normalizes_ring_contract(monkeypatch):
+    calls = []
+
+    def sage(q, k, v, **kwargs):
+        calls.append(kwargs)
+        batch, tokens, heads, _ = q.shape
+        lse = torch.arange(
+            batch * heads * tokens, dtype=torch.float32
+        ).reshape(batch, heads, tokens)
+        return q, lse
+
+    _mock_sage_available(monkeypatch, sage)
     weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
     q = torch.zeros((2, 3, 2, 128), dtype=torch.bfloat16)
 
-    with pytest.raises(NotImplementedError, match="Ring SP"):
-        weight.apply_with_lse(q, q, q, softmax_scale=0.25)
+    output, lse = weight.apply_with_lse(q, q, q, softmax_scale=0.25)
+
+    assert calls[-1]["return_lse"] is True
+    assert calls[-1]["config"] == {"backend": "sage_attn_v2_gfx1201"}
+    assert output.shape == (6, 256)
+    assert lse.shape == (6, 2)
+    expected_lse = (
+        torch.arange(12, dtype=torch.float32)
+        .reshape(2, 2, 3)
+        .transpose(1, 2)
+        .reshape(6, 2)
+    )
+    torch.testing.assert_close(lse, expected_lse)
 
 
 @pytest.mark.parametrize(
@@ -153,12 +171,6 @@ def test_sage_apply_with_lse_rejects_ring_sp(monkeypatch):
             {"window_size": (64, 64)},
             NotImplementedError,
             "sliding-window",
-        ),
-        (
-            torch.zeros((5, 2, 128), dtype=torch.bfloat16),
-            {"return_lse": True},
-            NotImplementedError,
-            "does not return LSE",
         ),
     ],
 )
@@ -439,6 +451,44 @@ def test_gfx1201_native_sage_self_attention_matches_reference():
     reference = _attention_reference(q, k, v, softmax_scale)
 
     _assert_sage_attention_close(actual.reshape_as(q), reference)
+
+
+@pytest.mark.requires_rocm
+@pytest.mark.requires_gfx1201
+@requires_gfx1201
+def test_gfx1201_native_sage_lse_matches_ring_contract():
+    torch.manual_seed(41)
+    q = torch.randn((65, 4, 128), device="cuda", dtype=torch.bfloat16) * 0.25
+    k = torch.randn_like(q) * 0.25
+    v = torch.randn_like(q) * 0.25
+    # A non-zero K mean makes this fail if Sage's smoothing delta is not
+    # restored before Ring consumes the per-shard LSE.
+    k = k + torch.linspace(
+        -0.35,
+        0.35,
+        q.shape[-1],
+        device=q.device,
+        dtype=q.dtype,
+    ).view(1, 1, -1)
+    softmax_scale = q.shape[-1] ** -0.5
+    weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
+
+    actual, actual_lse = weight.apply_with_lse(
+        q,
+        k,
+        v,
+        softmax_scale=softmax_scale,
+    )
+    scores = torch.einsum("qhd,khd->hqk", q.float(), k.float()) * softmax_scale
+    reference_lse = torch.logsumexp(scores, dim=-1).transpose(0, 1)
+
+    reference = _attention_reference(q, k, v, softmax_scale)
+    _assert_sage_attention_close(actual.reshape_as(q), reference)
+    assert actual_lse.shape == (q.shape[0], q.shape[1])
+    assert torch.isfinite(actual_lse).all()
+    lse_error = (actual_lse.float() - reference_lse).abs()
+    assert float(lse_error.mean()) <= 5e-2
+    assert float(lse_error.max()) <= 2e-1
 
 
 @pytest.mark.requires_rocm

@@ -167,8 +167,6 @@ class AiterFAv3SageBF16AttnWeight(AttnWeightTemplate):
             raise NotImplementedError(
                 f"{self.route_name} does not return attention probabilities"
             )
-        if kwargs.get("return_lse", False):
-            raise NotImplementedError(f"{self.route_name} does not return LSE")
         if kwargs.get("causal", kwargs.get("is_causal", False)):
             raise NotImplementedError(
                 f"{self.route_name} only supports non-causal attention"
@@ -225,6 +223,7 @@ class AiterFAv3SageBF16AttnWeight(AttnWeightTemplate):
         if q.ndim == 3:
             q, k, v = q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0)
 
+        return_lse = kwargs.get("return_lse", False)
         softmax_scale = kwargs.get("softmax_scale", kwargs.get("sm_scale"))
         kernel_config = kwargs.get("sage_config")
         if kernel_config is None:
@@ -250,17 +249,42 @@ class AiterFAv3SageBF16AttnWeight(AttnWeightTemplate):
             softcap=kwargs.get("softcap", kwargs.get("logits_soft_cap", 0.0)),
             deterministic=kwargs.get("deterministic", False),
             sm_margin=kwargs.get("sm_margin", 0),
-            return_lse=False,
+            return_lse=return_lse,
             layout="bshd",
             config=kernel_config,
             smooth_k=kwargs.get("smooth_k", True),
         )
 
         token_count = q.shape[0] * q.shape[1]
-        return result.reshape(token_count, -1)
+        if not return_lse:
+            return result.reshape(token_count, -1)
+        if not isinstance(result, tuple) or len(result) < 2:
+            raise RuntimeError(
+                f"{self.route_name} expected Aiter to return (output, lse)"
+            )
+        output, lse = result[:2]
+        return output.reshape(token_count, -1), lse
 
     def apply_with_lse(self, q, k, v, softmax_scale=None):
-        del q, k, v, softmax_scale
-        raise NotImplementedError(
-            f"{self.route_name} does not return LSE and cannot be used by Ring SP"
+        """Apply one native SageAttention2 block for Ring SP."""
+        output, lse = self.apply(
+            q,
+            k,
+            v,
+            softmax_scale=softmax_scale,
+            return_lse=True,
         )
+        batch_size = _batch_size(q)
+        token_count = _sequence_length(q)
+        head_count = q.shape[-2]
+        if lse.shape == (batch_size, head_count, token_count):
+            lse = lse.transpose(1, 2).reshape(batch_size * token_count, head_count)
+        elif lse.shape == (batch_size, token_count, head_count):
+            lse = lse.reshape(batch_size * token_count, head_count)
+        elif batch_size == 1 and lse.shape == (head_count, token_count):
+            lse = lse.transpose(0, 1).contiguous()
+        elif lse.shape != (batch_size * token_count, head_count):
+            raise RuntimeError(
+                f"{self.route_name} returned unsupported LSE shape {tuple(lse.shape)}"
+            )
+        return output, lse

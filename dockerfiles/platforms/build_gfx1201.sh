@@ -126,11 +126,13 @@ required_run_files=(
     README.md
     scripts/report_dit_progress.py
     scripts/run_wan22_moe_i2v_distill_fp8_4step_gfx1201_common.sh
+    scripts/run_wan22_moe_i2v_distill_fp8_4step_sage_gfx1201_common.sh
     scripts/run_wan22_moe_i2v_distill_lora_fp8_4step_gfx1201_common.sh
 )
 for gpu_count in 1 2 4 8 16; do
     required_run_files+=(
         "scripts/run_wan22_moe_i2v_distill_fp8_4step_gfx1201_${gpu_count}gpu.sh"
+        "scripts/run_wan22_moe_i2v_distill_fp8_4step_sage_gfx1201_${gpu_count}gpu.sh"
         "scripts/run_wan22_moe_i2v_distill_lora_fp8_4step_gfx1201_${gpu_count}gpu.sh"
     )
 done

@@ -30,9 +30,20 @@ Wan2.1 的 720P 同类入口为 `configs/platforms/amd_rocm/wan21_t2v_sage_gfx12
 
 720P sampled-row FP32 验证覆盖 Wan2.1 H5、Wan2.2 H5 和 Wan2.2 TI2V H3，共 6 个 workload/seed case。FP8 P offset 在 6/6 case 中提高 cosine 并降低 RMSE，平均归一化 P L1 error 从约 `0.03242` 降到 `0.02250`，相对 offset 关闭的 full-call 速度为 `0.99584x`，因此默认开启。
 
-原生 V2 当前只接受 dense、non-causal、D=128、Q/K/V 序列长度和 head 数相同、且不返回 LSE 的 self-attention。LightX2V 适配器会在调用边界检查这些条件，并显式选择 `sage_attn_v2_gfx1201`；不支持的调用会直接报错，不会静默回退 Sage v1。Wan text/image cross-attention 继续使用已调优的 `aiter_triton_bf16_flash_attn`。Ring SP 需要 LSE，暂时不能使用此 Sage V2 路径；对应运行应继续选择支持 LSE 的 BF16 attention 配置。
+原生 V2 当前接受 dense、non-causal、D=128、Q/K/V 序列长度和 head 数相同的 self-attention，并可选返回经过 K-smoothing 修正的自然对数 LSE。LightX2V 适配器会在调用边界检查这些条件，并显式选择 `sage_attn_v2_gfx1201`；不支持的调用会直接报错，不会静默回退 Sage v1。Wan text/image cross-attention 继续使用已调优的 `aiter_triton_bf16_flash_attn`。
 
-LightX2V 固定 Aiter revision 为 `f75b5f314c94546f549d23650e4c0ce74a3c1575`（`refactor(sage): name gfx1201 V2 backend explicitly`，包含已调优的 K-prefetch 和 FP8-P-offset 默认值）。更新该 revision 后必须重新构建镜像，现有镜像中的 Aiter wheel 和 LightX2V 源码不会自动变化。
+Wan A14B 有 40 个 attention heads，16 不能整除 40，因此 16 卡继续使用 Ring SP，不能改成 16 路 Ulysses。Ring 每轮调用原生 Sage V2 获得当前 K/V shard 的 output 和 LSE，再用 log-sum-exp 权重合并 16 个 shard；1/2/4/8 卡仍使用 Ulysses。该 LSE 路径已完成代码和 CPU 契约检查，正式作为 16 卡生产路径前还需要运行 gfx1201 sampled-row Ring merge correctness。
+
+LightX2VRun 保留 `--infer-fp8` 作为 BF16 attention 基线，原生 Sage V2 使用独立入口。16 卡命令为：
+
+```bash
+GPU_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 \
+  ./lightx2vModelrun --infer-sage-fp8
+```
+
+该入口生成 `seq_p_size=16`、`seq_p_attn_type=ring` 和 `self_attn_1_type=aiter_fav3_sage_bf16_attn` 的运行时配置。使用 1/2/4/8 个 GPU id 调用同一入口时自动改用 Ulysses，self-attention 仍为 Sage V2。
+
+LightX2V 固定 Aiter revision 为 `630e9c108106dbf2e21125d687ea9fcc142d264c`（`feat(sage): expose gfx1201 V2 LSE for Ring SP`，包含已调优的 K-prefetch 和 FP8-P-offset 默认值）。更新该 revision 后必须重新构建镜像，现有镜像中的 Aiter wheel 和 LightX2V 源码不会自动变化。
 
 ## 镜像构建源码
 

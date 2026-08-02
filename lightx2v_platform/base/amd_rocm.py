@@ -38,12 +38,12 @@ IS_AMD_ROCM = hasattr(torch.version, "hip") and torch.version.hip is not None
 # with the gfx1201-compatible tip of the aiter fork:
 #   repo:    https://gitcode.com/hvat-ai/aiter.git
 #   branch:  gfx1201-hvat-scratch
-#   commit:  f75b5f314 refactor(sage): name gfx1201 V2 backend explicitly
-# Older commits predate the canonical selector or tuned gfx1201 V2 defaults.
+#   commit:  630e9c108 feat(sage): expose gfx1201 V2 LSE for Ring SP
+# Older commits predate Ring LSE or the tuned gfx1201 V2 defaults.
 AITER_REPO = os.getenv("AITER_REPO", "https://gitcode.com/hvat-ai/aiter.git")
 AITER_BRANCH = os.getenv("AITER_BRANCH", "gfx1201-hvat-scratch")
 AITER_COMMIT = os.getenv(
-    "AITER_COMMIT", "f75b5f314c94546f549d23650e4c0ce74a3c1575"
+    "AITER_COMMIT", "630e9c108106dbf2e21125d687ea9fcc142d264c"
 )
 AITER_INSTALL_CMD = f"""
 # One-line install command for aiter (AMD ROCm optimized kernels).
