@@ -36,15 +36,14 @@ IS_AMD_ROCM = hasattr(torch.version, "hip") and torch.version.hip is not None
 # the image (e.g. `pip install -e .` from a fresh clone, or the
 # AITER_INSTALL_CMD snippet printed on ImportError). They are kept in sync
 # with the gfx1201-compatible tip of the aiter fork:
-#   repo:    https://github.com/yangecool/aiter.git
-#   branch:  main
-#   commit:  c4c6a15f1 perf(gemm_a8w8): add LightX2V DiT gfx1201 tuning
-# Older commits (e.g. 1b37c3317) predate the gfx1201 rowwise CK dispatch and
-# the LightX2V DiT tuning rows in a8w8_tuned_gemm.csv.
-AITER_REPO = os.getenv("AITER_REPO", "https://github.com/yangecool/aiter.git")
-AITER_BRANCH = os.getenv("AITER_BRANCH", "main")
+#   repo:    https://gitcode.com/hvat-ai/aiter.git
+#   branch:  gfx1201-hvat-scratch
+#   commit:  be651948c feat(sage): add native gfx1201 SageAttention2 bring-up
+# Older commits predate the native gfx1201 INT8-QK/FP8-PV Sage path.
+AITER_REPO = os.getenv("AITER_REPO", "https://gitcode.com/hvat-ai/aiter.git")
+AITER_BRANCH = os.getenv("AITER_BRANCH", "gfx1201-hvat-scratch")
 AITER_COMMIT = os.getenv(
-    "AITER_COMMIT", "c4c6a15f114365f37b592d4a21c9a887b9631326"
+    "AITER_COMMIT", "be651948c0bd116770c230146b8a6e03fc9fa8e9"
 )
 AITER_INSTALL_CMD = f"""
 # One-line install command for aiter (AMD ROCm optimized kernels).

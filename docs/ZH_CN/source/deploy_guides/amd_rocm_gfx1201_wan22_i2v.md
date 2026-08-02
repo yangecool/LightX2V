@@ -14,6 +14,22 @@
 
 当前没有为 GFX1201 提供 T2V、INT8 或 ComfyUI 管线。Wan2.2 high/low distill LoRA 可通过 `LightX2VRun` 一键合并、量化为 scaled FP8，并复用同一套多卡推理入口。
 
+## Aiter FAv3 Sage Attention A/B 路径
+
+AMD 平台新增 `aiter_fav3_sage_bf16_attn`，调用 Aiter 的 `fav3_sage_wrapper_func`：输入和输出为 BF16，Q/K 按块量化为 INT8，V 按通道量化为 GFX1201 原生 `float8_e4m3fn`。Aiter 源码把该公开入口标为 Sage Attention v1；从数值数据流看，它与 4090 上 SageAttention2 的 Q/K INT8、V FP8 分支属于同一类方案，但量化粒度、Triton kernel 和调度配置不是 NVIDIA CUDA 实现的直接移植。
+
+现有 FlyDSL/Triton BF16 配置继续作为基线。以下独立配置只把 self-attention 切换到 Sage V2；text/image cross-attention 保持已调优的 `aiter_triton_bf16_flash_attn`，便于在不引入短序列 Sage 退化的前提下比较画质、显存和耗时：
+
+- `configs/platforms/amd_rocm/wan22_moe_i2v_bf16_40step_r9600_sage_gfx1201.json`
+- `configs/platforms/amd_rocm/wan22_moe_i2v_distill_bf16_4step_sage_gfx1201.json`
+- `configs/platforms/amd_rocm/wan22_moe_i2v_distill_fp8_4step_sage_gfx1201.json`
+
+Wan2.1 的 720P 同类入口为 `configs/platforms/amd_rocm/wan21_t2v_sage_gfx1201.json` 和 `configs/platforms/amd_rocm/wan21_i2v_sage_gfx1201.json`。
+
+原生 V2 当前以 `BLOCK_M=128`、`BLOCK_N=32`、`waves_per_eu=2` 作为保守 bring-up 默认值，不继承 Triton Sage v1 的 `256x64/WPE3` winner。`aiter-tune-gfx1201` 会在 Wan2.1/Wan2.2 720P self-attention shape 上比较 `BM128/256 x BN32/64 x WPE2/3` 的八组组合，并分别记录预处理、kernel-only 和 full-call 耗时；GPU 结果出来前不把某一组写死为生产最优值。
+
+Aiter 的实验性原生 SageAttention2 使用 gfx1201 INT8 QK WMMA 和 FP8 PV WMMA。通过 `AITER_SAGE_GFX1201_NATIVE=1` 开启后，当前仅 dense、non-causal、D=128、Q/K/V head 数相同且不返回 LSE 的 self-attention 进入原生 V2。LightX2V 配置在算子层已经把 Wan text/image cross-attention 固定到已调优的 Triton BF16 MHA；Aiter 当前的 FlyDSL BF16 kernel 只支持 `Lq == Lkv` 的 self-attention，不能用于真实 cross-attention。Ring LSE 和其他未支持语义仍由 Aiter 的兼容入口回退 Triton Sage v1。不要在整份 Wan 配置中强制 `backend=flydsl_v2`，否则不支持的调用会按显式后端请求报错。原生路径通过 gfx1201 正确性和 720P full-call 性能门槛前，该环境开关默认关闭。
+
 ## 镜像构建源码
 
 镜像构建使用本地 LightX2V、AITER 和 LightX2VRun，不在 Dockerfile 中 clone 仓库。默认三个仓库互为 sibling：

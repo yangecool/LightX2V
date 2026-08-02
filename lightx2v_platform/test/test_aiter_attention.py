@@ -5,6 +5,7 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from lightx2v_platform.ops.attn.amd_rocm import flash_attn as adapter
+from lightx2v_platform.ops.attn.amd_rocm import sage_attn as sage_adapter
 
 
 def _has_gfx1201():
@@ -39,6 +40,118 @@ def _assert_attention_close(actual, reference):
     torch.testing.assert_close(
         actual.float(), reference.float(), atol=3e-2, rtol=3e-2
     )
+
+
+def _assert_sage_attention_close(actual, reference):
+    assert torch.isfinite(actual).all()
+    cosine = torch.nn.functional.cosine_similarity(
+        actual.float().flatten(), reference.float().flatten(), dim=0
+    )
+    assert float(cosine) >= 0.99
+    assert float((actual.float() - reference.float()).abs().mean()) <= 5e-2
+
+
+def _mock_sage_available(monkeypatch, func):
+    monkeypatch.setattr(sage_adapter, "IS_AMD_ROCM", True)
+    monkeypatch.setattr(sage_adapter, "AITER_FAV3_SAGE_AVAILABLE", True)
+    monkeypatch.setattr(sage_adapter, "aiter_fav3_sage_func", func)
+
+
+def test_sage_dense_contract_and_config_override(monkeypatch):
+    calls = []
+
+    def sage(q, k, v, **kwargs):
+        calls.append((q, k, v, kwargs))
+        return q
+
+    _mock_sage_available(monkeypatch, sage)
+    weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
+    q = torch.zeros((5, 2, 8), dtype=torch.bfloat16)
+    kernel_config = {
+        "BLOCK_M": 128,
+        "BLOCK_N": 64,
+        "waves_per_eu": 3,
+        "PRE_LOAD_V": False,
+        "num_stages": 2,
+        "num_warps": 8,
+    }
+
+    output = weight.apply(
+        q,
+        q,
+        q,
+        cu_seqlens_q=torch.tensor([0, 5]),
+        cu_seqlens_kv=torch.tensor([0, 5]),
+        max_seqlen_q=5,
+        max_seqlen_kv=5,
+        sage_config=kernel_config,
+    )
+
+    assert output.shape == (5, 16)
+    assert calls[-1][0].shape == (1, 5, 2, 8)
+    assert calls[-1][3]["layout"] == "bshd"
+    assert calls[-1][3]["config"] == kernel_config
+    assert calls[-1][3]["smooth_k"] is True
+
+
+def test_sage_apply_with_lse_normalizes_ring_contract(monkeypatch):
+    def sage(q, k, v, **kwargs):
+        assert kwargs["return_lse"] is True
+        batch, tokens, heads, _ = q.shape
+        lse = torch.arange(
+            batch * heads * tokens, dtype=torch.float32
+        ).reshape(batch, heads, tokens)
+        return q, lse
+
+    _mock_sage_available(monkeypatch, sage)
+    weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
+    q = torch.zeros((2, 3, 2, 8), dtype=torch.bfloat16)
+
+    output, lse = weight.apply_with_lse(q, q, q, softmax_scale=0.25)
+
+    assert output.shape == (6, 16)
+    assert lse.shape == (6, 2)
+    expected_lse = (
+        torch.arange(12, dtype=torch.float32)
+        .reshape(2, 2, 3)
+        .transpose(1, 2)
+        .reshape(6, 2)
+    )
+    torch.testing.assert_close(lse, expected_lse)
+
+
+@pytest.mark.parametrize(
+    ("q", "kwargs", "error", "message"),
+    [
+        (
+            torch.zeros((5, 2, 8), dtype=torch.float32),
+            {},
+            RuntimeError,
+            "requires BF16",
+        ),
+        (
+            torch.zeros((5, 2, 8), dtype=torch.bfloat16),
+            {"dropout_p": 0.1},
+            NotImplementedError,
+            "dropout",
+        ),
+        (
+            torch.zeros((5, 2, 8), dtype=torch.bfloat16),
+            {"cu_seqlens_q": torch.tensor([0, 2, 5])},
+            ValueError,
+            "dense fixed-length",
+        ),
+    ],
+)
+def test_sage_rejects_unsupported_contracts(monkeypatch, q, kwargs, error, message):
+    _mock_sage_available(
+        monkeypatch,
+        lambda *args, **kwargs: pytest.fail("Sage kernel must not run"),
+    )
+    weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
+
+    with pytest.raises(error, match=message):
+        weight.apply(q, q, q, **kwargs)
 
 
 def test_dense_and_varlen_metadata_contract(monkeypatch):
@@ -249,6 +362,29 @@ def test_gfx1201_dense_attention_with_lse_matches_reference():
 
     _assert_attention_close(actual.reshape_as(q), _attention_reference(q, k, v))
     torch.testing.assert_close(actual_lse, reference_lse, atol=3e-2, rtol=3e-2)
+
+
+@pytest.mark.requires_rocm
+@pytest.mark.requires_gfx1201
+@requires_gfx1201
+def test_gfx1201_native_sage_self_attention_matches_reference():
+    torch.manual_seed(37)
+    q = torch.randn((65, 4, 128), device="cuda", dtype=torch.bfloat16) * 0.25
+    k = torch.randn_like(q)
+    v = torch.randn_like(q)
+    softmax_scale = q.shape[-1] ** -0.5
+    weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
+
+    actual = weight.apply(
+        q,
+        k,
+        v,
+        softmax_scale=softmax_scale,
+        sage_config={"backend": "flydsl_v2"},
+    )
+    reference = _attention_reference(q, k, v, softmax_scale)
+
+    _assert_sage_attention_close(actual.reshape_as(q), reference)
 
 
 @pytest.mark.requires_rocm

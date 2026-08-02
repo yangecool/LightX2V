@@ -1,0 +1,35 @@
+{
+    "infer_steps": 4,
+    "target_video_length": 81,
+    "text_len": 512,
+    "target_height": 720,
+    "target_width": 1280,
+    "self_attn_1_type": "aiter_fav3_sage_bf16_attn",
+    "cross_attn_1_type": "aiter_triton_bf16_flash_attn",
+    "cross_attn_2_type": "aiter_triton_bf16_flash_attn",
+    "sample_guide_scale": [
+        3.5,
+        3.5
+    ],
+    "sample_shift": 5.0,
+    "enable_cfg": false,
+    "cpu_offload": true,
+    "offload_granularity": "phase",
+    "t5_cpu_offload": true,
+    "vae_cpu_offload": true,
+    "use_image_encoder": false,
+    "boundary_step_index": 2,
+    "denoising_step_list": [
+        1000,
+        750,
+        500,
+        250
+    ],
+    "high_noise_original_ckpt": "lightx2v/Wan2.2-Distill-Models/wan2.2_i2v_A14b_high_noise_lightx2v_4step.safetensors",
+    "low_noise_original_ckpt": "lightx2v/Wan2.2-Distill-Models/wan2.2_i2v_A14b_low_noise_lightx2v_4step.safetensors",
+    "rms_norm_type": "sgl-kernel",
+    "rope_type": "torch_real_rope",
+    "modulate_type": "torch",
+    "feature_caching": "NoCaching",
+    "parallel": false
+}
