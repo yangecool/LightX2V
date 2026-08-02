@@ -1,4 +1,4 @@
-"""AMD dense Sage Attention adapter backed by Aiter FAv3 Sage."""
+"""AMD dense self-attention adapter backed by Aiter SageAttention2."""
 
 import torch
 from loguru import logger
@@ -72,9 +72,9 @@ def _normalize_sage_window(window_size):
 
 @PLATFORM_ATTN_WEIGHT_REGISTER("aiter_fav3_sage_bf16_attn")
 class AiterFAv3SageBF16AttnWeight(AttnWeightTemplate):
-    """BF16 Q/K/V to Aiter INT8 Q/K plus FP8 V dense attention."""
+    """BF16 Q/K/V to native gfx1201 INT8-QK/FP8-PV SageAttention2."""
 
-    route_name = "Aiter FAv3 Sage BF16 Attention"
+    route_name = "Aiter gfx1201 SageAttention2"
 
     def __init__(self):
         self.config = {}
@@ -117,34 +117,41 @@ class AiterFAv3SageBF16AttnWeight(AttnWeightTemplate):
         batch_size = _batch_size(q)
         if _batch_size(k) != batch_size or _batch_size(v) != batch_size:
             raise ValueError(f"{self.route_name} requires matching Q/K/V batch sizes")
-        if _sequence_length(k) != _sequence_length(v):
-            raise ValueError(f"{self.route_name} requires matching K/V sequence lengths")
-        if k.shape[-2] != v.shape[-2]:
-            raise ValueError(f"{self.route_name} requires matching K/V head counts")
-        if q.shape[-2] % k.shape[-2] != 0:
-            raise ValueError(
-                f"{self.route_name} requires Q heads divisible by K/V heads"
-            )
-        if q.shape[-1] != k.shape[-1]:
-            raise ValueError(f"{self.route_name} requires matching Q/K head dimensions")
-
         q_len = _sequence_length(q)
-        kv_len = _sequence_length(k)
+        k_len = _sequence_length(k)
+        v_len = _sequence_length(v)
+        if q_len != k_len or q_len != v_len:
+            raise ValueError(
+                f"{self.route_name} only supports self-attention with matching "
+                f"Q/K/V sequence lengths, got {q_len}, {k_len}, and {v_len}"
+            )
+        if q.shape[-2] != k.shape[-2] or q.shape[-2] != v.shape[-2]:
+            raise ValueError(
+                f"{self.route_name} does not support GQA/MQA; Q/K/V head "
+                f"counts must match, got {q.shape[-2]}, {k.shape[-2]}, "
+                f"and {v.shape[-2]}"
+            )
+        if q.shape[-1] != 128 or k.shape[-1] != 128 or v.shape[-1] != 128:
+            raise ValueError(
+                f"{self.route_name} requires Q/K/V head dimension 128, got "
+                f"{q.shape[-1]}, {k.shape[-1]}, and {v.shape[-1]}"
+            )
+
         if max_seqlen_q is not None and int(max_seqlen_q) != q_len:
             raise ValueError(
                 f"max_seqlen_q must equal the dense Q length {q_len}, "
                 f"got {max_seqlen_q}"
             )
-        if max_seqlen_kv is not None and int(max_seqlen_kv) != kv_len:
+        if max_seqlen_kv is not None and int(max_seqlen_kv) != k_len:
             raise ValueError(
-                f"max_seqlen_kv must equal the dense K/V length {kv_len}, "
+                f"max_seqlen_kv must equal the dense K/V length {k_len}, "
                 f"got {max_seqlen_kv}"
             )
         _validate_dense_cu_seqlens(
             cu_seqlens_q, batch_size, q_len, "cu_seqlens_q"
         )
         _validate_dense_cu_seqlens(
-            cu_seqlens_kv, batch_size, kv_len, "cu_seqlens_kv"
+            cu_seqlens_kv, batch_size, k_len, "cu_seqlens_kv"
         )
 
     def _validate_options(self, kwargs):
@@ -159,6 +166,23 @@ class AiterFAv3SageBF16AttnWeight(AttnWeightTemplate):
         if kwargs.get("return_attn_probs", False):
             raise NotImplementedError(
                 f"{self.route_name} does not return attention probabilities"
+            )
+        if kwargs.get("return_lse", False):
+            raise NotImplementedError(f"{self.route_name} does not return LSE")
+        if kwargs.get("causal", kwargs.get("is_causal", False)):
+            raise NotImplementedError(
+                f"{self.route_name} only supports non-causal attention"
+            )
+        window_size = _normalize_sage_window(
+            kwargs.get("window_size", (-1, -1))
+        )
+        if window_size != (-1, -1):
+            raise NotImplementedError(
+                f"{self.route_name} does not support sliding-window attention"
+            )
+        if kwargs.get("attention_chunk", 0) not in (0, 1):
+            raise NotImplementedError(
+                f"{self.route_name} does not support attention chunking"
             )
         if kwargs.get("softcap", kwargs.get("logits_soft_cap", 0.0)) != 0.0:
             raise NotImplementedError(f"{self.route_name} does not support softcap")
@@ -201,61 +225,41 @@ class AiterFAv3SageBF16AttnWeight(AttnWeightTemplate):
         if q.ndim == 3:
             q, k, v = q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0)
 
-        return_lse = kwargs.get("return_lse", False)
-        causal = kwargs.get("causal", kwargs.get("is_causal", False))
         softmax_scale = kwargs.get("softmax_scale", kwargs.get("sm_scale"))
-        window_size = _normalize_sage_window(kwargs.get("window_size", (-1, -1)))
         kernel_config = kwargs.get("sage_config")
         if kernel_config is None:
             kernel_config = self.config.get("aiter_fav3_sage_config")
+        kernel_config = dict(kernel_config or {})
+        backend = kernel_config.get("backend", "flydsl_v2")
+        if backend != "flydsl_v2":
+            raise ValueError(
+                f"{self.route_name} requires sage_config backend='flydsl_v2', "
+                f"got {backend!r}"
+            )
+        kernel_config["backend"] = "flydsl_v2"
 
         result = aiter_fav3_sage_func(
             q,
             k,
             v,
             softmax_scale=softmax_scale,
-            causal=causal,
-            window_size=window_size,
+            causal=False,
+            window_size=(-1, -1),
             attention_chunk=kwargs.get("attention_chunk", 0),
             softcap=kwargs.get("softcap", kwargs.get("logits_soft_cap", 0.0)),
             deterministic=kwargs.get("deterministic", False),
             sm_margin=kwargs.get("sm_margin", 0),
-            return_lse=return_lse,
+            return_lse=False,
             layout="bshd",
             config=kernel_config,
             smooth_k=kwargs.get("smooth_k", True),
         )
 
         token_count = q.shape[0] * q.shape[1]
-        if not return_lse:
-            return result.reshape(token_count, -1)
-        if not isinstance(result, tuple) or len(result) < 2:
-            raise RuntimeError(
-                f"{self.route_name} expected Aiter to return (output, lse)"
-            )
-        output, lse = result[:2]
-        return output.reshape(token_count, -1), lse
+        return result.reshape(token_count, -1)
 
     def apply_with_lse(self, q, k, v, softmax_scale=None):
-        """Apply one dense Sage attention block for Ring SP."""
-        output, lse = self.apply(
-            q,
-            k,
-            v,
-            softmax_scale=softmax_scale,
-            return_lse=True,
+        del q, k, v, softmax_scale
+        raise NotImplementedError(
+            f"{self.route_name} does not return LSE and cannot be used by Ring SP"
         )
-        batch_size = _batch_size(q)
-        token_count = _sequence_length(q)
-        head_count = q.shape[-2]
-        if lse.shape == (batch_size, head_count, token_count):
-            lse = lse.transpose(1, 2).reshape(batch_size * token_count, head_count)
-        elif lse.shape == (batch_size, token_count, head_count):
-            lse = lse.reshape(batch_size * token_count, head_count)
-        elif batch_size == 1 and lse.shape == (head_count, token_count):
-            lse = lse.transpose(0, 1).contiguous()
-        elif lse.shape != (batch_size * token_count, head_count):
-            raise RuntimeError(
-                f"{self.route_name} returned unsupported LSE shape {tuple(lse.shape)}"
-            )
-        return output, lse

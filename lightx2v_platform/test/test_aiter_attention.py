@@ -57,7 +57,7 @@ def _mock_sage_available(monkeypatch, func):
     monkeypatch.setattr(sage_adapter, "aiter_fav3_sage_func", func)
 
 
-def test_sage_dense_contract_and_config_override(monkeypatch):
+def test_sage_dense_contract_forces_native_v2(monkeypatch):
     calls = []
 
     def sage(q, k, v, **kwargs):
@@ -66,15 +66,7 @@ def test_sage_dense_contract_and_config_override(monkeypatch):
 
     _mock_sage_available(monkeypatch, sage)
     weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
-    q = torch.zeros((5, 2, 8), dtype=torch.bfloat16)
-    kernel_config = {
-        "BLOCK_M": 128,
-        "BLOCK_N": 64,
-        "waves_per_eu": 3,
-        "PRE_LOAD_V": False,
-        "num_stages": 2,
-        "num_warps": 8,
-    }
+    q = torch.zeros((5, 2, 128), dtype=torch.bfloat16)
 
     output = weight.apply(
         q,
@@ -84,62 +76,89 @@ def test_sage_dense_contract_and_config_override(monkeypatch):
         cu_seqlens_kv=torch.tensor([0, 5]),
         max_seqlen_q=5,
         max_seqlen_kv=5,
-        sage_config=kernel_config,
     )
 
-    assert output.shape == (5, 16)
-    assert calls[-1][0].shape == (1, 5, 2, 8)
+    assert output.shape == (5, 256)
+    assert calls[-1][0].shape == (1, 5, 2, 128)
     assert calls[-1][3]["layout"] == "bshd"
-    assert calls[-1][3]["config"] == kernel_config
+    assert calls[-1][3]["config"] == {"backend": "flydsl_v2"}
+    assert calls[-1][3]["causal"] is False
+    assert calls[-1][3]["return_lse"] is False
     assert calls[-1][3]["smooth_k"] is True
 
 
-def test_sage_apply_with_lse_normalizes_ring_contract(monkeypatch):
+def test_sage_preserves_tuning_config_while_forcing_v2(monkeypatch):
+    calls = []
+
     def sage(q, k, v, **kwargs):
-        assert kwargs["return_lse"] is True
-        batch, tokens, heads, _ = q.shape
-        lse = torch.arange(
-            batch * heads * tokens, dtype=torch.float32
-        ).reshape(batch, heads, tokens)
-        return q, lse
+        calls.append(kwargs)
+        return q
 
     _mock_sage_available(monkeypatch, sage)
     weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
-    q = torch.zeros((2, 3, 2, 8), dtype=torch.bfloat16)
+    q = torch.zeros((5, 2, 128), dtype=torch.bfloat16)
+    kernel_config = {"BLOCK_M": 64, "BLOCK_N": 32}
 
-    output, lse = weight.apply_with_lse(q, q, q, softmax_scale=0.25)
+    weight.apply(q, q, q, sage_config=kernel_config)
 
-    assert output.shape == (6, 16)
-    assert lse.shape == (6, 2)
-    expected_lse = (
-        torch.arange(12, dtype=torch.float32)
-        .reshape(2, 2, 3)
-        .transpose(1, 2)
-        .reshape(6, 2)
+    assert calls[-1]["config"] == {
+        "BLOCK_M": 64,
+        "BLOCK_N": 32,
+        "backend": "flydsl_v2",
+    }
+    assert kernel_config == {"BLOCK_M": 64, "BLOCK_N": 32}
+
+
+def test_sage_apply_with_lse_rejects_ring_sp(monkeypatch):
+    _mock_sage_available(
+        monkeypatch,
+        lambda *args, **kwargs: pytest.fail("Sage kernel must not run"),
     )
-    torch.testing.assert_close(lse, expected_lse)
+    weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
+    q = torch.zeros((2, 3, 2, 128), dtype=torch.bfloat16)
+
+    with pytest.raises(NotImplementedError, match="Ring SP"):
+        weight.apply_with_lse(q, q, q, softmax_scale=0.25)
 
 
 @pytest.mark.parametrize(
     ("q", "kwargs", "error", "message"),
     [
         (
-            torch.zeros((5, 2, 8), dtype=torch.float32),
+            torch.zeros((5, 2, 128), dtype=torch.float32),
             {},
             RuntimeError,
             "requires BF16",
         ),
         (
-            torch.zeros((5, 2, 8), dtype=torch.bfloat16),
+            torch.zeros((5, 2, 128), dtype=torch.bfloat16),
             {"dropout_p": 0.1},
             NotImplementedError,
             "dropout",
         ),
         (
-            torch.zeros((5, 2, 8), dtype=torch.bfloat16),
+            torch.zeros((5, 2, 128), dtype=torch.bfloat16),
             {"cu_seqlens_q": torch.tensor([0, 2, 5])},
             ValueError,
             "dense fixed-length",
+        ),
+        (
+            torch.zeros((5, 2, 128), dtype=torch.bfloat16),
+            {"causal": True},
+            NotImplementedError,
+            "non-causal",
+        ),
+        (
+            torch.zeros((5, 2, 128), dtype=torch.bfloat16),
+            {"window_size": (64, 64)},
+            NotImplementedError,
+            "sliding-window",
+        ),
+        (
+            torch.zeros((5, 2, 128), dtype=torch.bfloat16),
+            {"return_lse": True},
+            NotImplementedError,
+            "does not return LSE",
         ),
     ],
 )
@@ -152,6 +171,42 @@ def test_sage_rejects_unsupported_contracts(monkeypatch, q, kwargs, error, messa
 
     with pytest.raises(error, match=message):
         weight.apply(q, q, q, **kwargs)
+
+
+@pytest.mark.parametrize(
+    ("q_shape", "k_shape", "v_shape", "message"),
+    [
+        ((5, 2, 128), (4, 2, 128), (4, 2, 128), "self-attention"),
+        ((5, 4, 128), (5, 2, 128), (5, 2, 128), "GQA/MQA"),
+        ((5, 2, 64), (5, 2, 64), (5, 2, 64), "head dimension 128"),
+    ],
+)
+def test_sage_rejects_non_native_shapes(
+    monkeypatch, q_shape, k_shape, v_shape, message
+):
+    _mock_sage_available(
+        monkeypatch,
+        lambda *args, **kwargs: pytest.fail("Sage kernel must not run"),
+    )
+    weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
+    q = torch.zeros(q_shape, dtype=torch.bfloat16)
+    k = torch.zeros(k_shape, dtype=torch.bfloat16)
+    v = torch.zeros(v_shape, dtype=torch.bfloat16)
+
+    with pytest.raises(ValueError, match=message):
+        weight.apply(q, k, v)
+
+
+def test_sage_rejects_non_v2_backend(monkeypatch):
+    _mock_sage_available(
+        monkeypatch,
+        lambda *args, **kwargs: pytest.fail("Sage kernel must not run"),
+    )
+    weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
+    q = torch.zeros((5, 2, 128), dtype=torch.bfloat16)
+
+    with pytest.raises(ValueError, match="backend='flydsl_v2'"):
+        weight.apply(q, q, q, sage_config={"backend": "triton"})
 
 
 def test_dense_and_varlen_metadata_contract(monkeypatch):
@@ -380,7 +435,6 @@ def test_gfx1201_native_sage_self_attention_matches_reference():
         k,
         v,
         softmax_scale=softmax_scale,
-        sage_config={"backend": "flydsl_v2"},
     )
     reference = _attention_reference(q, k, v, softmax_scale)
 

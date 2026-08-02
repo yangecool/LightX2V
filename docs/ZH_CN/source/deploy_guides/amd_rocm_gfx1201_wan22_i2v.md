@@ -2,7 +2,7 @@
 
 本文描述 `gfx1201-hvat-scratch` 分支中的 Wan2.2 I2V 管线。目标卡为 32 GB 显存、原生支持 E4M3/E5M2 FP8 矩阵计算的 AMD RDNA4/GFX1201。蒸馏 FP8 支持 1/2/4/8/16 卡：1/2/4/8 卡使用 Ulysses，16 卡使用 Ring，均关闭 CFG。
 
-> 所有 GFX1201 配置尚未进行镜像或硬件验证。32 GB 和原生 FP8 能力使蒸馏 FP8 成为最合理的首测管线，但不代表已经确认能在 32 GB 内完成 720p/81 帧生成。
+> GFX1201 attention 内核已经完成 720P 代表 shape 的正确性和性能验证；完整 Wan2.1/Wan2.2 生成仍需在模型机器上验证画质、显存和端到端耗时。
 
 ## 支持矩阵
 
@@ -14,9 +14,9 @@
 
 当前没有为 GFX1201 提供 T2V、INT8 或 ComfyUI 管线。Wan2.2 high/low distill LoRA 可通过 `LightX2VRun` 一键合并、量化为 scaled FP8，并复用同一套多卡推理入口。
 
-## Aiter FAv3 Sage Attention A/B 路径
+## Aiter 原生 SageAttention2 路径
 
-AMD 平台新增 `aiter_fav3_sage_bf16_attn`，调用 Aiter 的 `fav3_sage_wrapper_func`：输入和输出为 BF16，Q/K 按块量化为 INT8，V 按通道量化为 GFX1201 原生 `float8_e4m3fn`。Aiter 源码把该公开入口标为 Sage Attention v1；从数值数据流看，它与 4090 上 SageAttention2 的 Q/K INT8、V FP8 分支属于同一类方案，但量化粒度、Triton kernel 和调度配置不是 NVIDIA CUDA 实现的直接移植。
+AMD 平台的 `aiter_fav3_sage_bf16_attn` 调用 Aiter 的 `fav3_sage_wrapper_func`，并由 LightX2V 适配器显式传入 `backend=flydsl_v2`，因此不会回退到 Triton Sage v1。输入和输出为 BF16，Q/K 按块量化为 INT8，V 按通道量化为 GFX1201 原生 `float8_e4m3fn`；计算内核使用 gfx1201 的 INT8 QK WMMA 和 FP8 PV WMMA，对位 4090 SageAttention2 的 Q/K INT8、V FP8 数据流。
 
 现有 FlyDSL/Triton BF16 配置继续作为基线。以下独立配置只把 self-attention 切换到 Sage V2；text/image cross-attention 保持已调优的 `aiter_triton_bf16_flash_attn`，便于在不引入短序列 Sage 退化的前提下比较画质、显存和耗时：
 
@@ -26,9 +26,13 @@ AMD 平台新增 `aiter_fav3_sage_bf16_attn`，调用 Aiter 的 `fav3_sage_wrapp
 
 Wan2.1 的 720P 同类入口为 `configs/platforms/amd_rocm/wan21_t2v_sage_gfx1201.json` 和 `configs/platforms/amd_rocm/wan21_i2v_sage_gfx1201.json`。
 
-原生 V2 当前以 `BLOCK_M=128`、`BLOCK_N=32`、`waves_per_eu=2` 作为保守 bring-up 默认值，不继承 Triton Sage v1 的 `256x64/WPE3` winner。`aiter-tune-gfx1201` 会在 Wan2.1/Wan2.2 720P self-attention shape 上比较 `BM128/256 x BN32/64 x WPE2/3` 的八组组合，并分别记录预处理、kernel-only 和 full-call 耗时；GPU 结果出来前不把某一组写死为生产最优值。
+最终生产配置为 `BLOCK_M=128`、`BLOCK_N=32`、`waves_per_eu=2`、`LDS_PADDING=16`、K-only prefetch、`PRE_LOAD_V=false` 和 `USE_FP8_P_OFFSET=true`。720P 三 workload sweep 中，K-only prefetch、offset 关闭时的 kernel geomean 为调优后 FlyDSL BF16 的 `1.3840x`，full-call geomean 为 `1.3087x`；开启 offset 后 full-call geomean 约为 `1.3062x`。
 
-Aiter 的实验性原生 SageAttention2 使用 gfx1201 INT8 QK WMMA 和 FP8 PV WMMA。通过 `AITER_SAGE_GFX1201_NATIVE=1` 开启后，当前仅 dense、non-causal、D=128、Q/K/V head 数相同且不返回 LSE 的 self-attention 进入原生 V2。LightX2V 配置在算子层已经把 Wan text/image cross-attention 固定到已调优的 Triton BF16 MHA；Aiter 当前的 FlyDSL BF16 kernel 只支持 `Lq == Lkv` 的 self-attention，不能用于真实 cross-attention。Ring LSE 和其他未支持语义仍由 Aiter 的兼容入口回退 Triton Sage v1。不要在整份 Wan 配置中强制 `backend=flydsl_v2`，否则不支持的调用会按显式后端请求报错。原生路径通过 gfx1201 正确性和 720P full-call 性能门槛前，该环境开关默认关闭。
+720P sampled-row FP32 验证覆盖 Wan2.1 H5、Wan2.2 H5 和 Wan2.2 TI2V H3，共 6 个 workload/seed case。FP8 P offset 在 6/6 case 中提高 cosine 并降低 RMSE，平均归一化 P L1 error 从约 `0.03242` 降到 `0.02250`，相对 offset 关闭的 full-call 速度为 `0.99584x`，因此默认开启。
+
+原生 V2 当前只接受 dense、non-causal、D=128、Q/K/V 序列长度和 head 数相同、且不返回 LSE 的 self-attention。LightX2V 适配器会在调用边界检查这些条件，并显式选择 `flydsl_v2`；不支持的调用会直接报错，不会静默回退 Sage v1。Wan text/image cross-attention 继续使用已调优的 `aiter_triton_bf16_flash_attn`。Ring SP 需要 LSE，暂时不能使用此 Sage V2 路径；对应运行应继续选择支持 LSE 的 BF16 attention 配置。
+
+LightX2V 固定 Aiter revision 为 `53eb40c9463de9b7efeae8f58b75d31e1d187c47`（`perf(sage): select tuned gfx1201 V2 defaults`）。更新该 revision 后必须重新构建镜像，现有镜像中的 Aiter wheel 和 LightX2V 源码不会自动变化。
 
 ## 镜像构建源码
 
