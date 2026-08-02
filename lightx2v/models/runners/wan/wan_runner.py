@@ -135,10 +135,13 @@ class WanRunner(DisaggMixin, DefaultRunner):
                     self.run_vae_decoder(scheduler.latents)
                     torch_device_module.synchronize()
                 finally:
-                    self.clear_warmup_state()
                     inputs.pop("image_encoder_output", None)
+                    self.clear_warmup_state()
         finally:
             scheduler.sample_guide_scale = original_guide_scale
+            inputs.clear()
+            torch_device_module.synchronize()
+            self.maybe_empty_cache(force=True, collect_garbage=True)
 
         logger.info("Warmup completed")
 
