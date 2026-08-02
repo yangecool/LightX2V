@@ -230,13 +230,14 @@ class AiterFAv3SageBF16AttnWeight(AttnWeightTemplate):
         if kernel_config is None:
             kernel_config = self.config.get("aiter_fav3_sage_config")
         kernel_config = dict(kernel_config or {})
-        backend = kernel_config.get("backend", "flydsl_v2")
-        if backend != "flydsl_v2":
+        backend = kernel_config.get("backend", "sage_attn_v2_gfx1201")
+        if backend != "sage_attn_v2_gfx1201":
             raise ValueError(
-                f"{self.route_name} requires sage_config backend='flydsl_v2', "
+                f"{self.route_name} requires sage_config "
+                f"backend='sage_attn_v2_gfx1201', "
                 f"got {backend!r}"
             )
-        kernel_config["backend"] = "flydsl_v2"
+        kernel_config["backend"] = "sage_attn_v2_gfx1201"
 
         result = aiter_fav3_sage_func(
             q,

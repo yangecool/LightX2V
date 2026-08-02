@@ -81,7 +81,7 @@ def test_sage_dense_contract_forces_native_v2(monkeypatch):
     assert output.shape == (5, 256)
     assert calls[-1][0].shape == (1, 5, 2, 128)
     assert calls[-1][3]["layout"] == "bshd"
-    assert calls[-1][3]["config"] == {"backend": "flydsl_v2"}
+    assert calls[-1][3]["config"] == {"backend": "sage_attn_v2_gfx1201"}
     assert calls[-1][3]["causal"] is False
     assert calls[-1][3]["return_lse"] is False
     assert calls[-1][3]["smooth_k"] is True
@@ -104,7 +104,7 @@ def test_sage_preserves_tuning_config_while_forcing_v2(monkeypatch):
     assert calls[-1]["config"] == {
         "BLOCK_M": 64,
         "BLOCK_N": 32,
-        "backend": "flydsl_v2",
+        "backend": "sage_attn_v2_gfx1201",
     }
     assert kernel_config == {"BLOCK_M": 64, "BLOCK_N": 32}
 
@@ -205,7 +205,7 @@ def test_sage_rejects_non_v2_backend(monkeypatch):
     weight = sage_adapter.AiterFAv3SageBF16AttnWeight()
     q = torch.zeros((5, 2, 128), dtype=torch.bfloat16)
 
-    with pytest.raises(ValueError, match="backend='flydsl_v2'"):
+    with pytest.raises(ValueError, match="backend='sage_attn_v2_gfx1201'"):
         weight.apply(q, q, q, sage_config={"backend": "triton"})
 
 

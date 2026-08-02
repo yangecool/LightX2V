@@ -16,7 +16,7 @@
 
 ## Aiter 原生 SageAttention2 路径
 
-AMD 平台的 `aiter_fav3_sage_bf16_attn` 调用 Aiter 的 `fav3_sage_wrapper_func`，并由 LightX2V 适配器显式传入 `backend=flydsl_v2`，因此不会回退到 Triton Sage v1。输入和输出为 BF16，Q/K 按块量化为 INT8，V 按通道量化为 GFX1201 原生 `float8_e4m3fn`；计算内核使用 gfx1201 的 INT8 QK WMMA 和 FP8 PV WMMA，对位 4090 SageAttention2 的 Q/K INT8、V FP8 数据流。
+AMD 平台的 `aiter_fav3_sage_bf16_attn` 调用 Aiter 的 `fav3_sage_wrapper_func`，并由 LightX2V 适配器显式传入 `backend=sage_attn_v2_gfx1201`，因此不会回退到 Triton Sage v1。输入和输出为 BF16，Q/K 按块量化为 INT8，V 按通道量化为 GFX1201 原生 `float8_e4m3fn`；计算内核使用 gfx1201 的 INT8 QK WMMA 和 FP8 PV WMMA，对位 4090 SageAttention2 的 Q/K INT8、V FP8 数据流。
 
 现有 FlyDSL/Triton BF16 配置继续作为基线。以下独立配置只把 self-attention 切换到 Sage V2；text/image cross-attention 保持已调优的 `aiter_triton_bf16_flash_attn`，便于在不引入短序列 Sage 退化的前提下比较画质、显存和耗时：
 
@@ -30,9 +30,9 @@ Wan2.1 的 720P 同类入口为 `configs/platforms/amd_rocm/wan21_t2v_sage_gfx12
 
 720P sampled-row FP32 验证覆盖 Wan2.1 H5、Wan2.2 H5 和 Wan2.2 TI2V H3，共 6 个 workload/seed case。FP8 P offset 在 6/6 case 中提高 cosine 并降低 RMSE，平均归一化 P L1 error 从约 `0.03242` 降到 `0.02250`，相对 offset 关闭的 full-call 速度为 `0.99584x`，因此默认开启。
 
-原生 V2 当前只接受 dense、non-causal、D=128、Q/K/V 序列长度和 head 数相同、且不返回 LSE 的 self-attention。LightX2V 适配器会在调用边界检查这些条件，并显式选择 `flydsl_v2`；不支持的调用会直接报错，不会静默回退 Sage v1。Wan text/image cross-attention 继续使用已调优的 `aiter_triton_bf16_flash_attn`。Ring SP 需要 LSE，暂时不能使用此 Sage V2 路径；对应运行应继续选择支持 LSE 的 BF16 attention 配置。
+原生 V2 当前只接受 dense、non-causal、D=128、Q/K/V 序列长度和 head 数相同、且不返回 LSE 的 self-attention。LightX2V 适配器会在调用边界检查这些条件，并显式选择 `sage_attn_v2_gfx1201`；不支持的调用会直接报错，不会静默回退 Sage v1。Wan text/image cross-attention 继续使用已调优的 `aiter_triton_bf16_flash_attn`。Ring SP 需要 LSE，暂时不能使用此 Sage V2 路径；对应运行应继续选择支持 LSE 的 BF16 attention 配置。
 
-LightX2V 固定 Aiter revision 为 `53eb40c9463de9b7efeae8f58b75d31e1d187c47`（`perf(sage): select tuned gfx1201 V2 defaults`）。更新该 revision 后必须重新构建镜像，现有镜像中的 Aiter wheel 和 LightX2V 源码不会自动变化。
+LightX2V 固定 Aiter revision 为 `f75b5f314c94546f549d23650e4c0ce74a3c1575`（`refactor(sage): name gfx1201 V2 backend explicitly`，包含已调优的 K-prefetch 和 FP8-P-offset 默认值）。更新该 revision 后必须重新构建镜像，现有镜像中的 Aiter wheel 和 LightX2V 源码不会自动变化。
 
 ## 镜像构建源码
 
