@@ -1,4 +1,5 @@
 import math
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import torch
@@ -7,6 +8,7 @@ from packaging.version import parse
 from tqdm import tqdm
 
 from lightx2v.utils.profiler import ExcludedProfilingContext
+from lightx2v.utils.wan_runtune import get_wan_runtuner
 from lightx2v_platform.base.global_var import AI_DEVICE
 
 torch_device_module = getattr(torch, AI_DEVICE)
@@ -72,32 +74,45 @@ class WeightAsyncStreamManager(object):
         per-stream synchronize, so we use a device-wide sync on XPU.
         On CUDA, per-stream synchronize is sufficient and preferred.
         """
+        tuner = get_wan_runtuner()
+        started = time.perf_counter() if tuner.active else None
         if AI_DEVICE == "xpu":
             torch_device_module.synchronize()
         else:
             self.init_stream.synchronize()
+        if started is not None:
+            tuner.record_cpu_ms(
+                "offload.init_wait",
+                (time.perf_counter() - started) * 1000.0,
+            )
 
     def init_first_buffer(self, blocks, adapter_block_idx=None):
         with torch_device_module.stream(self.init_stream):
-            if hasattr(self, "cpu_buffers"):
-                if self.offload_granularity == "block":
-                    self.cuda_buffers[0].load_state_dict(self.cpu_buffers[0].state_dict(), 0, adapter_block_idx)
+            with get_wan_runtuner().gpu_region(
+                "offload.initial_copy", {"block_index": 0}
+            ):
+                if hasattr(self, "cpu_buffers"):
+                    if self.offload_granularity == "block":
+                        self.cuda_buffers[0].load_state_dict(self.cpu_buffers[0].state_dict(), 0, adapter_block_idx)
+                    else:
+                        self.cuda_buffers[0].load_state_dict(self.cpu_buffers[0][0].state_dict(), 0, adapter_block_idx)
                 else:
-                    self.cuda_buffers[0].load_state_dict(self.cpu_buffers[0][0].state_dict(), 0, adapter_block_idx)
-            else:
-                if self.offload_granularity == "block":
-                    self.cuda_buffers[0].load_state_dict(blocks[0].state_dict(), 0, adapter_block_idx)
-                else:
-                    self.cuda_buffers[0].load_state_dict(blocks[0].compute_phases[0].state_dict(), 0, adapter_block_idx)
+                    if self.offload_granularity == "block":
+                        self.cuda_buffers[0].load_state_dict(blocks[0].state_dict(), 0, adapter_block_idx)
+                    else:
+                        self.cuda_buffers[0].load_state_dict(blocks[0].compute_phases[0].state_dict(), 0, adapter_block_idx)
         self._sync()
         self.need_init_first_buffer = False
 
     def prefetch_weights(self, block_idx, blocks, adapter_block_idx=None):
         with torch_device_module.stream(self.cuda_load_stream):
-            if hasattr(self, "cpu_buffers"):
-                self.cuda_buffers[1].load_state_dict(self.cpu_buffers[0].state_dict(), block_idx, adapter_block_idx)
-            else:
-                self.cuda_buffers[1].load_state_dict(blocks[block_idx].state_dict(), block_idx, adapter_block_idx)
+            with get_wan_runtuner().gpu_region(
+                "offload.prefetch_copy", {"block_index": int(block_idx)}
+            ):
+                if hasattr(self, "cpu_buffers"):
+                    self.cuda_buffers[1].load_state_dict(self.cpu_buffers[0].state_dict(), block_idx, adapter_block_idx)
+                else:
+                    self.cuda_buffers[1].load_state_dict(blocks[block_idx].state_dict(), block_idx, adapter_block_idx)
 
     def prefetch_phase(self, block_idx, phase_idx, blocks, adapter_block_idx=None):
         with torch_device_module.stream(self.cuda_load_stream):
@@ -107,22 +122,48 @@ class WeightAsyncStreamManager(object):
                 self.cuda_buffers[phase_idx].load_state_dict(blocks[block_idx].compute_phases[phase_idx].state_dict(), block_idx, adapter_block_idx)
 
     def swap_blocks(self):
+        tuner = get_wan_runtuner()
         if AI_DEVICE == "xpu":
+            started = time.perf_counter() if tuner.active else None
             torch_device_module.synchronize()
+            if started is not None:
+                tuner.record_cpu_ms(
+                    "offload.device_wait",
+                    (time.perf_counter() - started) * 1000.0,
+                )
         else:
+            started = time.perf_counter() if tuner.active else None
             self.cuda_load_stream.synchronize()
+            if started is not None:
+                tuner.record_cpu_ms(
+                    "offload.load_wait",
+                    (time.perf_counter() - started) * 1000.0,
+                )
+            started = time.perf_counter() if tuner.active else None
             self.compute_stream.synchronize()
+            if started is not None:
+                tuner.record_cpu_ms(
+                    "offload.compute_wait",
+                    (time.perf_counter() - started) * 1000.0,
+                )
         self.cuda_buffers[0], self.cuda_buffers[1] = (
             self.cuda_buffers[1],
             self.cuda_buffers[0],
         )
 
     def swap_phases(self):
+        tuner = get_wan_runtuner()
+        started = time.perf_counter() if tuner.active else None
         if AI_DEVICE == "xpu":
             torch_device_module.synchronize()
         else:
             self.cuda_load_stream.synchronize()
             self.compute_stream.synchronize()
+        if started is not None:
+            tuner.record_cpu_ms(
+                "offload.phase_wait",
+                (time.perf_counter() - started) * 1000.0,
+            )
 
     @ExcludedProfilingContext("🔥 warm_up_cpu_buffers")
     def warm_up_cpu_buffers(self, blocks_num):

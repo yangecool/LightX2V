@@ -3,6 +3,7 @@
 import torch
 from loguru import logger
 
+from lightx2v.utils.wan_runtune import attention_detail, get_wan_runtuner
 from lightx2v_platform.base.amd_rocm import AITER_INSTALL_CMD
 from lightx2v_platform.ops.attn.template import AttnWeightTemplate
 from lightx2v_platform.registry_factory import PLATFORM_ATTN_WEIGHT_REGISTER
@@ -238,22 +239,25 @@ class AiterFAv3SageBF16AttnWeight(AttnWeightTemplate):
             )
         kernel_config["backend"] = "sage_attn_v2_gfx1201"
 
-        result = aiter_fav3_sage_func(
-            q,
-            k,
-            v,
-            softmax_scale=softmax_scale,
-            causal=False,
-            window_size=(-1, -1),
-            attention_chunk=kwargs.get("attention_chunk", 0),
-            softcap=kwargs.get("softcap", kwargs.get("logits_soft_cap", 0.0)),
-            deterministic=kwargs.get("deterministic", False),
-            sm_margin=kwargs.get("sm_margin", 0),
-            return_lse=return_lse,
-            layout="bshd",
-            config=kernel_config,
-            smooth_k=kwargs.get("smooth_k", True),
-        )
+        with get_wan_runtuner().gpu_region(
+            "attention.sage_v2", attention_detail(q, k, v)
+        ):
+            result = aiter_fav3_sage_func(
+                q,
+                k,
+                v,
+                softmax_scale=softmax_scale,
+                causal=False,
+                window_size=(-1, -1),
+                attention_chunk=kwargs.get("attention_chunk", 0),
+                softcap=kwargs.get("softcap", kwargs.get("logits_soft_cap", 0.0)),
+                deterministic=kwargs.get("deterministic", False),
+                sm_margin=kwargs.get("sm_margin", 0),
+                return_lse=return_lse,
+                layout="bshd",
+                config=kernel_config,
+                smooth_k=kwargs.get("smooth_k", True),
+            )
 
         token_count = q.shape[0] * q.shape[1]
         if not return_lse:

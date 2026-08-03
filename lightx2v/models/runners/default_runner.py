@@ -17,6 +17,7 @@ from lightx2v.utils.generate_task_id import generate_task_id
 from lightx2v.utils.global_paras import CALIB
 from lightx2v.utils.profiler import *
 from lightx2v.utils.utils import fixed_shape_resize, get_optimal_patched_size_with_sp, isotropic_crop_resize, mux_audio_from_video, save_to_image, save_to_video, wan_vae_to_comfy
+from lightx2v.utils.wan_runtune import get_wan_runtuner
 from lightx2v_platform.base.global_var import AI_DEVICE
 
 torch_device_module = getattr(torch, AI_DEVICE)
@@ -243,14 +244,25 @@ class DefaultRunner(BaseRunner):
                     self.check_stop()
                 logger.info(f"==> step_index: {step_index + 1} / {infer_steps}")
 
-                with ProfilingContext4DebugL1("step_pre"):
-                    self.model.scheduler.step_pre(step_index=step_index)
+                runtuner = get_wan_runtuner()
+                runtuner.begin_step(step_index, infer_steps, segment_idx)
+                try:
+                    with ProfilingContext4DebugL1("step_pre"):
+                        self.model.scheduler.step_pre(step_index=step_index)
 
-                with ProfilingContext4DebugL1("🚀 infer_main"):
-                    self.model.infer(self.inputs)
+                    with ProfilingContext4DebugL1("🚀 infer_main"):
+                        self.model.infer(self.inputs)
 
-                with ProfilingContext4DebugL1("step_post"):
-                    self.model.scheduler.step_post()
+                    with ProfilingContext4DebugL1("step_post"):
+                        self.model.scheduler.step_post()
+                except BaseException as exc:
+                    runtuner.end_step(
+                        success=False,
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+                    raise
+                else:
+                    runtuner.end_step()
 
                 if self.progress_callback:
                     current_step = segment_idx * infer_steps + step_index + 1

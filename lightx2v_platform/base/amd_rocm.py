@@ -156,6 +156,8 @@ class AiterSglKernelCompat:
         restores the Aiter contract without copying the checkpoint tensor when
         LightX2V's normal ``[N, K].t()`` view is used.
         """
+        from lightx2v.utils.wan_runtune import gemm_detail, get_wan_runtuner
+
         if input_quant.ndim != 2 or weight.ndim != 2:
             raise ValueError(
                 f"A8W8 expects 2D matrices, got input={input_quant.ndim}D weight={weight.ndim}D"
@@ -189,7 +191,17 @@ class AiterSglKernelCompat:
             raise ValueError(f"bias must be on {input_quant.device}, got {bias.device}")
 
         weight_nk = weight.transpose(-2, -1)
-        return self._gemm_a8w8(input_quant, weight_nk, input_scale, weight_scale, bias, dtype)
+        with get_wan_runtuner().gpu_region(
+            "fp8.gemm", gemm_detail(m, n, k, input_quant.dtype)
+        ):
+            return self._gemm_a8w8(
+                input_quant,
+                weight_nk,
+                input_scale,
+                weight_scale,
+                bias,
+                dtype,
+            )
 
     def int8_scaled_mm(self, input_quant, weight, input_scale, weight_scale, dtype, bias=None):
         """INT8 GEMM compatible with sgl_kernel.int8_scaled_mm"""
@@ -197,9 +209,15 @@ class AiterSglKernelCompat:
 
     def sgl_per_token_quant_fp8(self, x, out, scale):
         """Per-token FP8 quantization compatible with sgl_kernel.sgl_per_token_quant_fp8"""
-        q, s = self._pertoken_quant(x, quant_dtype=torch.float8_e4m3fn)
-        out.copy_(q)
-        scale.copy_(s)
+        from lightx2v.utils.wan_runtune import get_wan_runtuner
+
+        m, k = x.shape
+        with get_wan_runtuner().gpu_region(
+            "fp8.quant", {"m": int(m), "k": int(k), "dtype": str(x.dtype)}
+        ):
+            q, s = self._pertoken_quant(x, quant_dtype=torch.float8_e4m3fn)
+            out.copy_(q)
+            scale.copy_(s)
 
     def sgl_per_token_group_quant_fp8(self, x, out, scale, group_size=128, eps=1e-10, fp8_min=-448.0, fp8_max=448.0):
         """Per-token per-group FP8 quantization compatible with sgl_kernel.sgl_per_token_group_quant_fp8"""

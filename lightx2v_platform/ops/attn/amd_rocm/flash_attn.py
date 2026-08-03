@@ -11,6 +11,7 @@ from collections import Counter, OrderedDict
 import torch
 from loguru import logger
 
+from lightx2v.utils.wan_runtune import attention_detail, get_wan_runtuner
 from lightx2v_platform.base.amd_rocm import (
     AITER_COMMIT,
     AITER_INSTALL_CMD,
@@ -381,16 +382,19 @@ class AiterFlyDSLBF16FlashAttnWeight(_AiterBF16FlashAttnWeight):
 
         if not is_flydsl_available():
             raise RuntimeError(f"{self.route_name} requires the FlyDSL runtime")
-        return super().apply(
-            q,
-            k,
-            v,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-            **kwargs,
-        )
+        with get_wan_runtuner().gpu_region(
+            "attention.flydsl_bf16", attention_detail(q, k, v)
+        ):
+            return super().apply(
+                q,
+                k,
+                v,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                **kwargs,
+            )
 
 
 @PLATFORM_ATTN_WEIGHT_REGISTER("aiter_triton_bf16_flash_attn")
@@ -424,16 +428,19 @@ class AiterTritonBF16FlashAttnWeight(_AiterBF16FlashAttnWeight):
             raise RuntimeError(
                 f"{self.route_name} received an input that would route to Aiter FlyDSL"
             )
-        return super().apply(
-            q,
-            k,
-            v,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-            **kwargs,
-        )
+        with get_wan_runtuner().gpu_region(
+            "attention.triton_bf16", attention_detail(q, k, v)
+        ):
+            return super().apply(
+                q,
+                k,
+                v,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=cu_seqlens_kv,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                **kwargs,
+            )
 
     def apply_with_lse(self, q, k, v, softmax_scale=None):
         """Apply one dense Triton attention block for Ring SP."""

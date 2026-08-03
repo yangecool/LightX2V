@@ -4,6 +4,7 @@ import torch.distributed as dist
 from lightx2v.common.transformer_infer.transformer_infer import BaseTransformerInfer
 from lightx2v.utils.envs import *
 from lightx2v.utils.registry_factory import *
+from lightx2v.utils.wan_runtune import gpu_timed
 from lightx2v_platform.base.global_var import AI_DEVICE
 
 from .mxfp8_fuse import WanMxfp8FuseMixin, scaled_mxfp8_modulate_quant
@@ -207,6 +208,7 @@ class WanTransformerInfer(WanMxfp8FuseMixin, BaseTransformerInfer):
 
         return shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa
 
+    @gpu_timed("wan.self_phase")
     def infer_self_attn(self, phase, x, shift_msa, scale_msa, grid_sizes=None):
         cos_sin = self.cos_sin
         norm1_quant = None
@@ -319,6 +321,7 @@ class WanTransformerInfer(WanMxfp8FuseMixin, BaseTransformerInfer):
 
         return y
 
+    @gpu_timed("wan.cross_phase")
     def infer_cross_attn(self, phase, x, context, y_out, gate_msa):
         if self.sensitive_layer_dtype != self.infer_dtype:
             x = x.to(self.sensitive_layer_dtype) + y_out.to(self.sensitive_layer_dtype) * gate_msa.squeeze()
@@ -378,6 +381,7 @@ class WanTransformerInfer(WanMxfp8FuseMixin, BaseTransformerInfer):
             torch_device_module.empty_cache()
         return x, attn_out
 
+    @gpu_timed("wan.ffn_phase")
     def infer_ffn(self, phase, x, attn_out, c_shift_msa, c_scale_msa, c_gate_msa=None):
         x.add_(attn_out)
 
